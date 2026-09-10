@@ -2,6 +2,7 @@
   /usr/lib/gcc/x86_64-linux-gnu/15/../../../x86_64-linux-gnu/Scrt1.o \
   /usr/lib/gcc/x86_64-linux-gnu/15/../../../x86_64-linux-gnu/crti.o \
   /usr/lib/gcc/x86_64-linux-gnu/15/crtbeginS.o \
+  CMakeFiles/main.dir/src/common/command.cc.o \
   CMakeFiles/main.dir/src/kv/kv_store.cc.o \
   CMakeFiles/main.dir/src/main.cc.o \
   CMakeFiles/main.dir/src/network/tcp_server.cc.o \
@@ -43,6 +44,8 @@
 /usr/lib/gcc/x86_64-linux-gnu/15/../../../x86_64-linux-gnu/crti.o:
 
 /usr/lib/gcc/x86_64-linux-gnu/15/crtbeginS.o:
+
+CMakeFiles/main.dir/src/common/command.cc.o:
 
 CMakeFiles/main.dir/src/kv/kv_store.cc.o:
 

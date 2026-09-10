@@ -1,64 +1,37 @@
 #include<iostream>
 #include<sstream>
 #include "kv/kv_store.h"
+#include "persist/persister.h"
+#include "common/command.h"
 
-int main()
+int main(int argc,char* argv[])
 {
-    kvStore store;
+    //设置日志输出路径(默认在my_kvraft/data/wal.log)
+    std::string logPath="../data/";
+    if(argc>1) logPath=argv[1];
+
+    //初始化store和persister
+    KVStore store(std::make_shared<Persister>(logPath+"wal.log"));
+
     std::string line;
     while(true)
     {
-        std::cout<<"> ";
+        std::cout<<"> ";    
+
         if(!std::getline(std::cin,line)) break;         //读取一行输入，若读到EOF或错误则退出
         if(line.empty()) 
         {
             std::cout<<"empty input"<<std::endl;
             continue;
         }
-
-        std::istringstream iss(line);                          //使用istringstream来解析输入
-        std::string op;
-        iss>>op;
-        //std::cout<<"op = "<<op<<std::endl;
         
-        if(op=="PUT")
-        {
-            std::string key,value;
-            iss>>key>>value;
-            store.put(key,value);
-            std::cout<<"PUT SUCCESS"<<std::endl;
-        }
-        else if(op=="GET")
-        {
-            std::string key;
-            iss>>key;
-            std::optional<std::string> value=store.get(key);
-            if(value.has_value())
-            {
-                std::cout<<"Found value = "<<value.value()<<" "<<std::endl;
-            }
-            else 
-            {
-                std::cout<<"Value not found"<<std::endl;
-            }
-        }
-        else if(op=="DEL")
-        {
-            std::string key;
-            iss>>key;
-            if(store.remove(key))
-            {
-                std::cout<<"Delete success"<<std::endl;
-            }
-            else
-            {
-                std::cout<<"This value isn't exist"<<std::endl;
-            }
-        }
-        else
-        {
-            std::cout<<"无效的operation"<<std::endl;
-        }
+        //解析command
+        std::optional<Command> command = ParseCommand(line);
+
+        //执行并写入日志
+        if(command.has_value()) store.Execute(command.value());
+        else std::cout<<"invalid command"<<std::endl;
+
     }
 
     return 0;

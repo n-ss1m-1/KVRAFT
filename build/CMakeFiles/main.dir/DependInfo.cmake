@@ -8,6 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/home/truth/Code/my_kvraft/src/common/command.cc" "CMakeFiles/main.dir/src/common/command.cc.o" "gcc" "CMakeFiles/main.dir/src/common/command.cc.o.d"
   "/home/truth/Code/my_kvraft/src/kv/kv_store.cc" "CMakeFiles/main.dir/src/kv/kv_store.cc.o" "gcc" "CMakeFiles/main.dir/src/kv/kv_store.cc.o.d"
   "/home/truth/Code/my_kvraft/src/main.cc" "CMakeFiles/main.dir/src/main.cc.o" "gcc" "CMakeFiles/main.dir/src/main.cc.o.d"
   "/home/truth/Code/my_kvraft/src/network/tcp_server.cc" "CMakeFiles/main.dir/src/network/tcp_server.cc.o" "gcc" "CMakeFiles/main.dir/src/network/tcp_server.cc.o.d"

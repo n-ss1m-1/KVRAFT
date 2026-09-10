@@ -1,0 +1,15 @@
+# CMake编译产物
+build/
+bin/
+data/
+tests/test_data/
+
+# 临时文件、编辑器缓存
+*.o
+*.so
+*.a
+*.out
+*.log
+.DS_Store
+.vscode/
+*.swp

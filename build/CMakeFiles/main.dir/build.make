@@ -72,10 +72,24 @@ include CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/codegen:
 .PHONY : CMakeFiles/main.dir/codegen
 
+CMakeFiles/main.dir/src/common/command.cc.o: CMakeFiles/main.dir/flags.make
+CMakeFiles/main.dir/src/common/command.cc.o: /home/truth/Code/my_kvraft/src/common/command.cc
+CMakeFiles/main.dir/src/common/command.cc.o: CMakeFiles/main.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/main.dir/src/common/command.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/common/command.cc.o -MF CMakeFiles/main.dir/src/common/command.cc.o.d -o CMakeFiles/main.dir/src/common/command.cc.o -c /home/truth/Code/my_kvraft/src/common/command.cc
+
+CMakeFiles/main.dir/src/common/command.cc.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/main.dir/src/common/command.cc.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/truth/Code/my_kvraft/src/common/command.cc > CMakeFiles/main.dir/src/common/command.cc.i
+
+CMakeFiles/main.dir/src/common/command.cc.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/main.dir/src/common/command.cc.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/truth/Code/my_kvraft/src/common/command.cc -o CMakeFiles/main.dir/src/common/command.cc.s
+
 CMakeFiles/main.dir/src/kv/kv_store.cc.o: CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/src/kv/kv_store.cc.o: /home/truth/Code/my_kvraft/src/kv/kv_store.cc
 CMakeFiles/main.dir/src/kv/kv_store.cc.o: CMakeFiles/main.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/main.dir/src/kv/kv_store.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/main.dir/src/kv/kv_store.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/kv/kv_store.cc.o -MF CMakeFiles/main.dir/src/kv/kv_store.cc.o.d -o CMakeFiles/main.dir/src/kv/kv_store.cc.o -c /home/truth/Code/my_kvraft/src/kv/kv_store.cc
 
 CMakeFiles/main.dir/src/kv/kv_store.cc.i: cmake_force
@@ -89,7 +103,7 @@ CMakeFiles/main.dir/src/kv/kv_store.cc.s: cmake_force
 CMakeFiles/main.dir/src/main.cc.o: CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/src/main.cc.o: /home/truth/Code/my_kvraft/src/main.cc
 CMakeFiles/main.dir/src/main.cc.o: CMakeFiles/main.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/main.dir/src/main.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/main.dir/src/main.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/main.cc.o -MF CMakeFiles/main.dir/src/main.cc.o.d -o CMakeFiles/main.dir/src/main.cc.o -c /home/truth/Code/my_kvraft/src/main.cc
 
 CMakeFiles/main.dir/src/main.cc.i: cmake_force
@@ -103,7 +117,7 @@ CMakeFiles/main.dir/src/main.cc.s: cmake_force
 CMakeFiles/main.dir/src/network/tcp_server.cc.o: CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/src/network/tcp_server.cc.o: /home/truth/Code/my_kvraft/src/network/tcp_server.cc
 CMakeFiles/main.dir/src/network/tcp_server.cc.o: CMakeFiles/main.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/main.dir/src/network/tcp_server.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/main.dir/src/network/tcp_server.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/network/tcp_server.cc.o -MF CMakeFiles/main.dir/src/network/tcp_server.cc.o.d -o CMakeFiles/main.dir/src/network/tcp_server.cc.o -c /home/truth/Code/my_kvraft/src/network/tcp_server.cc
 
 CMakeFiles/main.dir/src/network/tcp_server.cc.i: cmake_force
@@ -117,7 +131,7 @@ CMakeFiles/main.dir/src/network/tcp_server.cc.s: cmake_force
 CMakeFiles/main.dir/src/persist/persister.cc.o: CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/src/persist/persister.cc.o: /home/truth/Code/my_kvraft/src/persist/persister.cc
 CMakeFiles/main.dir/src/persist/persister.cc.o: CMakeFiles/main.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/main.dir/src/persist/persister.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/main.dir/src/persist/persister.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/persist/persister.cc.o -MF CMakeFiles/main.dir/src/persist/persister.cc.o.d -o CMakeFiles/main.dir/src/persist/persister.cc.o -c /home/truth/Code/my_kvraft/src/persist/persister.cc
 
 CMakeFiles/main.dir/src/persist/persister.cc.i: cmake_force
@@ -131,7 +145,7 @@ CMakeFiles/main.dir/src/persist/persister.cc.s: cmake_force
 CMakeFiles/main.dir/src/raft/raft_log.cc.o: CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/src/raft/raft_log.cc.o: /home/truth/Code/my_kvraft/src/raft/raft_log.cc
 CMakeFiles/main.dir/src/raft/raft_log.cc.o: CMakeFiles/main.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/main.dir/src/raft/raft_log.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/main.dir/src/raft/raft_log.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/raft/raft_log.cc.o -MF CMakeFiles/main.dir/src/raft/raft_log.cc.o.d -o CMakeFiles/main.dir/src/raft/raft_log.cc.o -c /home/truth/Code/my_kvraft/src/raft/raft_log.cc
 
 CMakeFiles/main.dir/src/raft/raft_log.cc.i: cmake_force
@@ -145,7 +159,7 @@ CMakeFiles/main.dir/src/raft/raft_log.cc.s: cmake_force
 CMakeFiles/main.dir/src/raft/raft_node.cc.o: CMakeFiles/main.dir/flags.make
 CMakeFiles/main.dir/src/raft/raft_node.cc.o: /home/truth/Code/my_kvraft/src/raft/raft_node.cc
 CMakeFiles/main.dir/src/raft/raft_node.cc.o: CMakeFiles/main.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/main.dir/src/raft/raft_node.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/main.dir/src/raft/raft_node.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/main.dir/src/raft/raft_node.cc.o -MF CMakeFiles/main.dir/src/raft/raft_node.cc.o.d -o CMakeFiles/main.dir/src/raft/raft_node.cc.o -c /home/truth/Code/my_kvraft/src/raft/raft_node.cc
 
 CMakeFiles/main.dir/src/raft/raft_node.cc.i: cmake_force
@@ -158,6 +172,7 @@ CMakeFiles/main.dir/src/raft/raft_node.cc.s: cmake_force
 
 # Object files for target main
 main_OBJECTS = \
+"CMakeFiles/main.dir/src/common/command.cc.o" \
 "CMakeFiles/main.dir/src/kv/kv_store.cc.o" \
 "CMakeFiles/main.dir/src/main.cc.o" \
 "CMakeFiles/main.dir/src/network/tcp_server.cc.o" \
@@ -168,6 +183,7 @@ main_OBJECTS = \
 # External object files for target main
 main_EXTERNAL_OBJECTS =
 
+/home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/src/common/command.cc.o
 /home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/src/kv/kv_store.cc.o
 /home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/src/main.cc.o
 /home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/src/network/tcp_server.cc.o
@@ -177,7 +193,7 @@ main_EXTERNAL_OBJECTS =
 /home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/build.make
 /home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/compiler_depend.ts
 /home/truth/Code/my_kvraft/bin/main: CMakeFiles/main.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Linking CXX executable /home/truth/Code/my_kvraft/bin/main"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/truth/Code/my_kvraft/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Linking CXX executable /home/truth/Code/my_kvraft/bin/main"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/main.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

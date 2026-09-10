@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)                             # CMAKE版本要求
+cmake_minimum_required(VERSION 3.10)                             # CMAKE版本要求
 
 project(kvraft)                                                 # 项目名称
 
@@ -21,6 +21,17 @@ target_link_libraries(main PRIVATE pthread)                     # 链接线程�
 
 
 # 生成测试程序
-add_executable(test_store tests/test_kv_store.cc src/kv/kv_store.cc)
-target_compile_options(test_store PRIVATE -Wall -Wextra -g -O0)       
-target_link_libraries(test_store PRIVATE pthread)
+#add_executable(test_store 
+#                            tests/test_kv_store.cc 
+#                            src/kv/kv_store.cc
+#                )
+#target_compile_options(test_store PRIVATE -Wall -Wextra -g -O0)       
+#target_link_libraries(test_store PRIVATE pthread)
+
+
+add_executable(test_persister 
+                                tests/test_persist.cc
+                                src/kv/kv_store.cc
+                                src/persist/persister.cc
+                                src/common/command.cc
+                )

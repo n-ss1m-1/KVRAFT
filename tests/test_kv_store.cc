@@ -5,7 +5,7 @@
 #include <vector>
 
 void TestSingleThread() {
-    kvStore store;
+    KVStore store;
     
     // put 然后 get
     store.put("hello", "world");
@@ -31,7 +31,7 @@ void TestSingleThread() {
 }
 
 void TestMultiThread() {
-    kvStore store;
+    KVStore store;
     constexpr int kThreadNum = 8;
     constexpr int kKeysPerThread = 1000;
     
@@ -62,7 +62,7 @@ void TestMultiThread() {
 }
 
 void TestConcurrentReadWrite() {
-    kvStore store;
+    KVStore store;
     
     for (int i = 0; i < 100; i++) {
         store.put("key_" + std::to_string(i), "initial");

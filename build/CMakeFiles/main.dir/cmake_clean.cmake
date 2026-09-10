@@ -2,6 +2,8 @@ file(REMOVE_RECURSE
   "/home/truth/Code/my_kvraft/bin/main"
   "/home/truth/Code/my_kvraft/bin/main.pdb"
   "CMakeFiles/main.dir/link.d"
+  "CMakeFiles/main.dir/src/common/command.cc.o"
+  "CMakeFiles/main.dir/src/common/command.cc.o.d"
   "CMakeFiles/main.dir/src/kv/kv_store.cc.o"
   "CMakeFiles/main.dir/src/kv/kv_store.cc.o.d"
   "CMakeFiles/main.dir/src/main.cc.o"
