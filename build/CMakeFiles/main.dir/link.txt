@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/main.dir/link.d CMakeFiles/main.dir/src/kv/kv_store.cc.o CMakeFiles/main.dir/src/main.cc.o CMakeFiles/main.dir/src/network/tcp_server.cc.o CMakeFiles/main.dir/src/persist/persister.cc.o CMakeFiles/main.dir/src/raft/raft_log.cc.o CMakeFiles/main.dir/src/raft/raft_node.cc.o -o /home/truth/Code/my_kvraft/bin/main  -lpthread

@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/truth/Code/my_kvraft/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/test_store.dir/link.d CMakeFiles/test_store.dir/tests/test_kv_store.cc.o CMakeFiles/test_store.dir/src/kv/kv_store.cc.o -o /home/truth/Code/my_kvraft/bin/test_store  -lpthread
