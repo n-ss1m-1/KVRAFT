@@ -1,3 +1,0 @@
-/home/truth/Code/my_kvraft/build/CMakeFiles/main.dir
-/home/truth/Code/my_kvraft/build/CMakeFiles/edit_cache.dir
-/home/truth/Code/my_kvraft/build/CMakeFiles/rebuild_cache.dir
