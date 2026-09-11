@@ -29,9 +29,9 @@ target_link_libraries(main PRIVATE pthread)                     # 链接线程�
 #target_link_libraries(test_store PRIVATE pthread)
 
 
-add_executable(test_persister 
-                                tests/test_persist.cc
-                                src/kv/kv_store.cc
-                                src/persist/persister.cc
-                                src/common/command.cc
-                )
+#add_executable(test_persister 
+#                                tests/test_persist.cc
+#                                src/kv/kv_store.cc
+#                                src/persist/persister.cc
+#                                src/common/command.cc
+#                )

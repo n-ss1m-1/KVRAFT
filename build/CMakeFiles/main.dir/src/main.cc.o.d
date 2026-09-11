@@ -211,4 +211,6 @@ CMakeFiles/main.dir/src/main.cc.o: /home/truth/Code/my_kvraft/src/main.cc \
  /usr/include/c++/15/bits/stl_vector.h \
  /usr/include/c++/15/bits/stl_bvector.h \
  /usr/include/c++/15/bits/vector.tcc \
- /home/truth/Code/my_kvraft/src/common/command.h
+ /home/truth/Code/my_kvraft/src/common/command.h \
+ /home/truth/Code/my_kvraft/src/network/tcp_server.h \
+ /home/truth/Code/my_kvraft/src/network/../common/config.h

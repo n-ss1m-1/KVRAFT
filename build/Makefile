@@ -129,26 +129,12 @@ main/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/build
 .PHONY : main/fast
 
-#=============================================================================
-# Target rules for targets named test_persister
-
-# Build rule for target.
-test_persister: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_persister
-.PHONY : test_persister
-
-# fast build rule for target.
-test_persister/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/build
-.PHONY : test_persister/fast
-
 src/common/command.o: src/common/command.cc.o
 .PHONY : src/common/command.o
 
 # target to build an object file
 src/common/command.cc.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/common/command.cc.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/common/command.cc.o
 .PHONY : src/common/command.cc.o
 
 src/common/command.i: src/common/command.cc.i
@@ -157,7 +143,6 @@ src/common/command.i: src/common/command.cc.i
 # target to preprocess a source file
 src/common/command.cc.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/common/command.cc.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/common/command.cc.i
 .PHONY : src/common/command.cc.i
 
 src/common/command.s: src/common/command.cc.s
@@ -166,7 +151,6 @@ src/common/command.s: src/common/command.cc.s
 # target to generate assembly for a file
 src/common/command.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/common/command.cc.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/common/command.cc.s
 .PHONY : src/common/command.cc.s
 
 src/kv/kv_store.o: src/kv/kv_store.cc.o
@@ -175,7 +159,6 @@ src/kv/kv_store.o: src/kv/kv_store.cc.o
 # target to build an object file
 src/kv/kv_store.cc.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/kv/kv_store.cc.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/kv/kv_store.cc.o
 .PHONY : src/kv/kv_store.cc.o
 
 src/kv/kv_store.i: src/kv/kv_store.cc.i
@@ -184,7 +167,6 @@ src/kv/kv_store.i: src/kv/kv_store.cc.i
 # target to preprocess a source file
 src/kv/kv_store.cc.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/kv/kv_store.cc.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/kv/kv_store.cc.i
 .PHONY : src/kv/kv_store.cc.i
 
 src/kv/kv_store.s: src/kv/kv_store.cc.s
@@ -193,7 +175,6 @@ src/kv/kv_store.s: src/kv/kv_store.cc.s
 # target to generate assembly for a file
 src/kv/kv_store.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/kv/kv_store.cc.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/kv/kv_store.cc.s
 .PHONY : src/kv/kv_store.cc.s
 
 src/main.o: src/main.cc.o
@@ -250,7 +231,6 @@ src/persist/persister.o: src/persist/persister.cc.o
 # target to build an object file
 src/persist/persister.cc.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/persist/persister.cc.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/persist/persister.cc.o
 .PHONY : src/persist/persister.cc.o
 
 src/persist/persister.i: src/persist/persister.cc.i
@@ -259,7 +239,6 @@ src/persist/persister.i: src/persist/persister.cc.i
 # target to preprocess a source file
 src/persist/persister.cc.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/persist/persister.cc.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/persist/persister.cc.i
 .PHONY : src/persist/persister.cc.i
 
 src/persist/persister.s: src/persist/persister.cc.s
@@ -268,7 +247,6 @@ src/persist/persister.s: src/persist/persister.cc.s
 # target to generate assembly for a file
 src/persist/persister.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/persist/persister.cc.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/src/persist/persister.cc.s
 .PHONY : src/persist/persister.cc.s
 
 src/raft/raft_log.o: src/raft/raft_log.cc.o
@@ -319,30 +297,6 @@ src/raft/raft_node.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/src/raft/raft_node.cc.s
 .PHONY : src/raft/raft_node.cc.s
 
-tests/test_persist.o: tests/test_persist.cc.o
-.PHONY : tests/test_persist.o
-
-# target to build an object file
-tests/test_persist.cc.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/tests/test_persist.cc.o
-.PHONY : tests/test_persist.cc.o
-
-tests/test_persist.i: tests/test_persist.cc.i
-.PHONY : tests/test_persist.i
-
-# target to preprocess a source file
-tests/test_persist.cc.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/tests/test_persist.cc.i
-.PHONY : tests/test_persist.cc.i
-
-tests/test_persist.s: tests/test_persist.cc.s
-.PHONY : tests/test_persist.s
-
-# target to generate assembly for a file
-tests/test_persist.cc.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_persister.dir/build.make CMakeFiles/test_persister.dir/tests/test_persist.cc.s
-.PHONY : tests/test_persist.cc.s
-
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -352,7 +306,6 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... main"
-	@echo "... test_persister"
 	@echo "... src/common/command.o"
 	@echo "... src/common/command.i"
 	@echo "... src/common/command.s"
@@ -374,9 +327,6 @@ help:
 	@echo "... src/raft/raft_node.o"
 	@echo "... src/raft/raft_node.i"
 	@echo "... src/raft/raft_node.s"
-	@echo "... tests/test_persist.o"
-	@echo "... tests/test_persist.i"
-	@echo "... tests/test_persist.s"
 .PHONY : help
 
 

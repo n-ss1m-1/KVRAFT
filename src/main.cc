@@ -3,6 +3,7 @@
 #include "kv/kv_store.h"
 #include "persist/persister.h"
 #include "common/command.h"
+#include "network/tcp_server.h"
 
 int main(int argc,char* argv[])
 {
@@ -11,28 +12,15 @@ int main(int argc,char* argv[])
     if(argc>1) logPath=argv[1];
 
     //初始化store和persister
-    KVStore store(std::make_shared<Persister>(logPath+"wal.log"));
+    std::shared_ptr<Persister> persister = std::make_shared<Persister>(logPath+"wal.log");
+    std::shared_ptr<KVStore> store = std::make_shared<KVStore>(persister);
 
-    std::string line;
-    while(true)
-    {
-        std::cout<<"> ";    
+    //重放日志到内存中
+    store->Load();
 
-        if(!std::getline(std::cin,line)) break;         //读取一行输入，若读到EOF或错误则退出
-        if(line.empty()) 
-        {
-            std::cout<<"empty input"<<std::endl;
-            continue;
-        }
-        
-        //解析command
-        std::optional<Command> command = ParseCommand(line);
+    TcpServer server(store);        //▲默认参数都靠右边
 
-        //执行并写入日志
-        if(command.has_value()) store.Execute(command.value());
-        else std::cout<<"invalid command"<<std::endl;
-
-    }
+    server.Start();
 
     return 0;
 }

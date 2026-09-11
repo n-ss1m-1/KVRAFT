@@ -1,3 +1,7 @@
+#include<iostream>
+#include<sstream>
+
+
 #include "kv_store.h"
 #include "../persist/persister.h"
 #include "../common/command.h"
@@ -50,6 +54,38 @@ void KVStore::Execute(const Command& command)
         {    
             bool result=Delete(command.key);
             if(!result) std::cout<<"This key isn't exist"<<std::endl;
+            break;
+        }
+    }
+}
+
+void KVStore::Execute(const Command& command,std::string& reply)
+{
+    switch(command.type)
+    {
+        case Command::Type::PUT: 
+        {
+            Put(command.key,command.value);
+            reply="PUT success\n";
+            break;
+        }
+        case Command::Type::GET: 
+        {   
+            std::optional<std::string> value=Get(command.key);                          //▲给 case 内部代码加大括号 `{ }`，否则value不允许在此处定义初始化
+            if(value.has_value()) 
+            {
+                std::ostringstream oss;
+                oss<<"GET success: Value = "<<value.value()<<std::endl;
+                reply=oss.str();
+            }
+            else reply="This key isn't exist\n";
+            break;
+        }
+        case Command::Type::DEL: 
+        {    
+            bool result=Delete(command.key);
+            if(!result) reply="This key isn't exist\n";
+            else        reply="DELETE success\n";
             break;
         }
     }
