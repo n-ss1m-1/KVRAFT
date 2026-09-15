@@ -1,5 +1,8 @@
-#include "persister.h"
+//persister.cc
+
 #include<fstream>
+
+#include "persister.h"
 
 
 //初始化文件名+打开文件
@@ -28,16 +31,18 @@ Persister::~Persister()
 */
 bool Persister::AppendToFile(const std::string& line)  
 {
-    ssize_t remaining=line.size();
-    const char* buf=line.c_str();
+    std::string data=line+'\n';                     // !在此处添加'\n'，与下面的同类，而非在其他地方额外处理
+    ssize_t remaining=data.size();
+    const char* buf=data.c_str();
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     while(remaining>0)
     {
-        int n=write(fd_,buf,remaining);
+        ssize_t n=write(fd_,buf,remaining);
         if(n==-1)
         {
+            if(errno==EINTR) continue;
             perror("appendToFile:write");
             return false;                   //通过返回值告知写入是否成功
         }

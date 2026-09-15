@@ -35,3 +35,25 @@ std::vector<Command> ParseCommand(const std::vector<std::string>& lines)
     
     return commands;
 }
+
+std::string CommandTypeToString(const Command& command)
+{
+    switch (command.type)
+    {
+        case Command::Type::PUT:
+            return "PUT";
+        case Command::Type::GET:
+            return "GET";
+        case Command::Type::DEL:
+            return "DEL";
+    }
+    return "UNKOWN";
+}
+
+std::optional<Command::Type> StringToCommandType(const std::string& type)
+{
+    if(type=="PUT") return Command::Type::PUT;
+    if(type=="GET") return Command::Type::GET;
+    if(type=="DEL") return Command::Type::DEL;
+    return std::nullopt;
+}

@@ -7,6 +7,7 @@
 #include<errno.h>
 #include<string.h>
 #include<iostream>
+#include<thread>
 
 
 #include "tcp_server.h"
@@ -31,7 +32,6 @@ TcpServer::TcpServer(std::shared_ptr<KVStore> store,const std::string& ip,int po
     ip_(ip),
     port_(port),
     listenFd_(CreateFd()),
-    connFd_(-1),
     store_(store)
 {
     //开启端口复用(避免TIMEWAIT等待)+禁用Nagle算法
@@ -54,7 +54,6 @@ TcpServer::~TcpServer()
 
     //在析构处自然关闭fd
     close(listenFd_);
-    close(connFd_);
 }
 
 void TcpServer::Start()
@@ -89,13 +88,17 @@ void TcpServer::Start()
     //循环：accept
     while(started_)
     {
-        connFd_=accept(listenFd_,(struct sockaddr*)&cliAddr,&cliLen);
-        if(connFd_==-1)
+        int connFd=accept(listenFd_,(struct sockaddr*)&cliAddr,&cliLen);
+        if(connFd==-1)
         {
             perror("accept");
             exit(EXIT_FAILURE);
         }
-        HandleClient();
+        //▲每个连接各使用一个单线程服务
+        std::thread([this,connFd,cliAddr](){
+            HandleClient(connFd,cliAddr);       //▲捕获this是为了使用其成员函数，否则对象不明确
+            close(connFd);
+        }).detach();                        //子线程结束后系统自动回收
     }
 }
 
@@ -104,20 +107,25 @@ void TcpServer::Stop()
     started_=false;
 }
 
-void TcpServer::HandleClient()
+void TcpServer::HandleClient(int connFd,struct sockaddr_in cliAddr)
 {
-    std::cout<<"Connect success"<<std::endl;
+    int cliPort=ntohs(cliAddr.sin_port);
+    char cliIp[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET,&cliAddr.sin_addr,cliIp,INET_ADDRSTRLEN);
+    
+    std::cout<<cliIp<<":"<<cliPort<<": "<<"Connect success"<<std::endl;
     char buf[4096];
     std::string buffer;
     while(true)
     {
         //read
-        ssize_t len=read(connFd_,buf,sizeof(buf));      //!sizeof->容量 strlen->实际长度
+        ssize_t len=read(connFd,buf,sizeof(buf));      //!sizeof->容量 strlen->实际长度
         //错误处理
         if(len==0) 
         {
             //▲客户端关闭
-            std::cout<<"Connection close\n";
+            std::cout<<cliIp<<":"<<cliPort<<": "<<"Connection close\n";
+            close(connFd);
             return;
         }
         else if(len==-1)
@@ -126,6 +134,7 @@ void TcpServer::HandleClient()
             else 
             {
                 perror("read");
+                close(connFd);
                 return;                                  //!只退出HandleClient 而不exit退出程序->其他客户端仍能正常连接
             }
         }
@@ -133,7 +142,7 @@ void TcpServer::HandleClient()
         //len>0 -> 处理
         buffer.append(buf,len);
 
-        std::cout<<"receive: "<<buffer<<std::endl;
+        std::cout<<cliIp<<":"<<cliPort<<": "<<"receive: "<<buffer<<std::endl;
         
         size_t pos;
         while((pos=buffer.find('\n'))!=std::string::npos)   //以换行符`\n`作为分隔
@@ -143,7 +152,6 @@ void TcpServer::HandleClient()
             buffer.erase(0,pos+1);                          //!删除0~pos+1: 跳到'\n'后一位      !必须先erase再判断是否为空行->否则直接换行会导致死循环
             if(line.empty()) 
             {
-                std::cout<<"test line empty\n";
                 continue;                  //空指令 直接跳到下一轮
             }
             
@@ -152,7 +160,7 @@ void TcpServer::HandleClient()
             auto command=ParseCommand(line);
             if(!command.has_value())
             {
-                std::cout<<"Invalid command"<<std::endl;
+                std::cout<<cliIp<<":"<<cliPort<<": "<<"Invalid command"<<std::endl;
                 continue;
             }
             
@@ -160,20 +168,21 @@ void TcpServer::HandleClient()
             std::string reply;          //传出参数
             store_->Execute(command.value(),reply);
 
-            std::cout<<"reply: "<<reply<<std::endl;
+            std::cout<<cliIp<<":"<<cliPort<<": "<<"reply: "<<reply<<std::endl;
         
             //循环：write(避免一次写不完)
             size_t written=0;
             size_t remaining=reply.size();                              //!   size()返回size_t类型   read、write返回ssize_t类型
             while(remaining>0)
             {
-                ssize_t len=write(connFd_,reply.c_str()+written,remaining);         //!每次写之后都偏移指针
+                ssize_t len=write(connFd,reply.c_str()+written,remaining);         //!每次写之后都偏移指针
                 if(len==-1)
                 {
                     if(errno==EINTR) continue;
                     else
                     {
                         perror("write");
+                        close(connFd);
                         return;                  //!只退出HandleClient 而不exit退出程序->其他客户端仍能正常连接
                     }
                 }

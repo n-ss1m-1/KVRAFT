@@ -16,14 +16,13 @@ public:
 
     void Stop();
 
-    void HandleClient();
+    void HandleClient(int connFd,struct sockaddr_in cliAddr);
 
 private:
     bool started_;
     std::string ip_;
     int port_;
     int listenFd_;
-    int connFd_;
     std::shared_ptr<KVStore> store_;            //为什么使用shared_ptr？
 };
 

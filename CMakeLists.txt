@@ -35,3 +35,23 @@ target_link_libraries(main PRIVATE pthread)                     # 链接线程�
 #                                src/persist/persister.cc
 #                                src/common/command.cc
 #                )
+
+#add_executable(test_raft_log
+#    tests/test_raft_log.cc
+#    src/raft/raft_log.cc
+#    src/common/command.cc        
+#)
+
+#add_executable(test_codec
+#    tests/test_codec.cc
+#    src/raft/raft_message_codec.cc
+#    src/common/command.cc
+#)
+
+add_executable(test_raft_storage
+    tests/test_raft_storage.cc
+    src/raft/raft_storage.cc
+    src/raft/raft_message_codec.cc
+    src/persist/persister.cc
+    src/common/command.cc        
+)

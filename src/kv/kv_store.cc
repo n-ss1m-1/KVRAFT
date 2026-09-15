@@ -88,6 +88,10 @@ void KVStore::Execute(const Command& command,std::string& reply)
             else        reply="DELETE success\n";
             break;
         }
+        default:
+        {
+            reply="Invalid command\n";
+        }
     }
 }
 
