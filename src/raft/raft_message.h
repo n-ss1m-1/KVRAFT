@@ -52,7 +52,8 @@ struct AppendEntriesReply
 {
     int64_t term = 0;               // Follower 当前任期（Leader 据此判断是否退位）
     bool success = false;
-    int64_t conflictIndex = 0;      // 失败时返回：日志冲突的起点（加速 Leader 回退）
+    int64_t matchIndex = 0;         // success == true 时有效 ：日志匹配的终点
+    int64_t conflictIndex = 0;      // success == false 时有效：日志冲突的起点（加速 Leader 回退）
 };
 
 
