@@ -18,3 +18,6 @@ tests/test_data/
 .DS_Store
 .vscode/
 *.swp
+
+# 备份文件
+back/

@@ -11,13 +11,13 @@ include_directories(${PROJECT_SOURCE_DIR}/src/*.h)              # 包含头文�
 file(GLOB_RECURSE SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc)     # 递归寻找源文件
 
 
-add_executable(main ${SRC})                                     # 生成可执行程序
+#add_executable(main ${SRC})                                     # 生成可执行程序
 
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_CURRENT_SOURCE_DIR}/bin)     # 设置可执行程序输出路径
 
-target_compile_options(main PRIVATE -Wall -Wextra -g -O0)       # 开启大部分警告+额外警告 生成调试信息 关闭优化
+#target_compile_options(main PRIVATE -Wall -Wextra -g -O0)       # 开启大部分警告+额外警告 生成调试信息 关闭优化
 
-target_link_libraries(main PRIVATE pthread)                     # 链接线程库 (PRIVATE：仅本层可见 链接本层的不可见)
+#target_link_libraries(main PRIVATE pthread)                     # 链接线程库 (PRIVATE：仅本层可见 链接本层的不可见)
 
 
 # 生成测试程序
@@ -48,10 +48,30 @@ target_link_libraries(main PRIVATE pthread)                     # 链接线程�
 #    src/common/command.cc
 #)
 
-add_executable(test_raft_storage
-    tests/test_raft_storage.cc
+#add_executable(test_raft_storage
+#    tests/test_raft_storage.cc
+#    src/raft/raft_storage.cc
+#    src/raft/raft_message_codec.cc
+#    src/persist/persister.cc
+#    src/common/command.cc        
+#)
+
+add_executable(test_raft_node
+    tests/test_raft_node.cc
+    src/raft/raft_node.cc
+    src/raft/raft_log.cc
     src/raft/raft_storage.cc
     src/raft/raft_message_codec.cc
     src/persist/persister.cc
-    src/common/command.cc        
+    src/kv/kv_store.cc
+    src/common/command.cc
 )
+
+
+
+
+
+
+
+
+
