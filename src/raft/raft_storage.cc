@@ -31,6 +31,15 @@ bool RaftStorage::AppendLogEntry(const LogEntry& entry)
     return logPersister_.AppendToFile(SerializeLogEntry(entry));
 }
 
+bool RaftStorage::AppendLogEntries(const std::vector<LogEntry>& entries)
+{
+    for(const LogEntry& entry : entries)
+    {
+        if(!AppendLogEntry(entry)) return false;
+    }
+    return true;
+}
+
 std::vector<LogEntry> RaftStorage::LoadLogEntries()
 {   
     std::vector<LogEntry> entries;

@@ -26,6 +26,8 @@ public:
     //=========== 日志 ===========
     //追加一条日志
     bool AppendLogEntry(const LogEntry& entry);
+    //添加多条日志
+    bool AppendLogEntries(const std::vector<LogEntry>& entries);
     //读取所有日志
     std::vector<LogEntry> LoadLogEntries();
 
