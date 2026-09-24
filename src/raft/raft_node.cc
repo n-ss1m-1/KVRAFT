@@ -2,8 +2,12 @@
 #include<random>
 #include<stdexcept>
 #include<algorithm>
+#include<iostream>
 
-#include "raft_node.h"
+#include "kv/kv_store.h"
+#include "raft/raft_storage.h"
+#include "raft/raft_transport.h"
+#include "raft/raft_node.h"
 
 
 
@@ -26,7 +30,7 @@ RaftNode::RaftNode(int32_t nodeId,
                 totalNodes_(totalNodes),
                 log_(RaftLog()),
                 electionResetTime_(std::chrono::steady_clock::now()),
-                electionTimeoutMs_(randomTimeoutMs(150,300)),
+                electionTimeoutMs_(randomTimeoutMs(150, 300)),
                 transport_(std::move(transport)),                   // 使用move传递参数，更快速
                 storage_(std::move(storage)),
                 stateMachine_(std::move(stateMachine))
@@ -43,7 +47,7 @@ RaftNode::RaftNode(int32_t nodeId,
     }
 }
 
-//GET 和 PUT DEL 能否通用?
+//Leader专用
 bool RaftNode::Start(const Command& command)
 {
     LogEntry entry;
@@ -58,7 +62,7 @@ bool RaftNode::Start(const Command& command)
         entry.term = currentTerm_;
         entry.command = command;
 
-        //将命令保存到日志
+        //将日志保存到内存
         log_.AppendEntry(entry);
 
         //将日志保存到磁盘
@@ -90,23 +94,31 @@ bool RaftNode::Start(const Command& command)
 
 //同步阻塞调用transport_->SendRequestVote，等待消息回复
 //▲! 注意设置超时时间，一直等待 那节点就一直阻塞 无法处理其他事情
-bool RaftNode::SendRequestVote(int32_t peerId,const RequestVoteArgs& args)
+void RaftNode::SendRequestVote(int32_t peerId,const RequestVoteArgs& args)
 {
     //此处(仅RPC发送消息 Sendxxx)不能持有锁 后续HandleRequestVoteReply内会加锁
-    RequestVoteReply reply;
-    if(!transport_->SendRequestVote(peerId,args,reply)) return false;           //返回发送结果：成功or失败
-
-    HandleRequestVoteReply(peerId,reply);
-    return true;
+    std::weak_ptr<RaftNode> weakSelf = weak_from_this();
+    transport_->SendRequestVote(peerId,args,
+        [weakSelf,peerId](const RequestVoteReply& reply)
+        {
+            if(auto self = weakSelf.lock())                 //! 生命周期：RpcClient>=RaftNode(RaftNode持有shared_ptr_RpcClient,反向则没有)，所以此处需要检查，如果用this可能悬空
+            {
+                self->HandleRequestVoteReply(peerId,reply);
+            }
+        });
 }
 
-bool RaftNode::SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args)
+void RaftNode::SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args)
 {
-    AppendEntriesReply reply;
-    if(!transport_->SendAppendEntries(peerId,args,reply)) return false;
-
-    HandleAppendEntriesReply(peerId,reply);
-    return true;
+    std::weak_ptr<RaftNode> weakSelf = weak_from_this();
+    transport_->SendAppendEntries(peerId,args,
+        [weakSelf,peerId](const AppendEntriesReply& reply)
+        {
+            if(auto self = weakSelf.lock())
+            {
+                self->HandleAppendEntriesReply(peerId,reply);
+            }
+        });
 }
 
 // 向所有 Follower 发送 AppendEntries：
@@ -151,6 +163,9 @@ void RaftNode::SendHeartbeat()
 
 void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& reply)
 {
+    std::cout << "[Node " << nodeId_ << "] HandleRequestVote from candidate="
+              << args.candidateId << " args.term=" << args.term
+              << " my.term=" << currentTerm_ << std::endl;
     //此处为顶层函数 -> 加锁
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -160,6 +175,8 @@ void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& 
     //1. 检查term
     if(args.term<currentTerm_)            //▲! 过时的候选者不能成为Leader
     {
+        std::cout << "[Node " << nodeId_ << "] Vote REJECT: args.term="
+                  << args.term << " < my.term=" << currentTerm_ << std::endl;
         reply.term = currentTerm_;
         return;                             
     }
@@ -168,16 +185,31 @@ void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& 
     reply.term=currentTerm_;
     
     //2. 检查是否已投过票(▲!可以重复投给同一候选者_消息丢失_幂等无影响)
-    if(votedFor_!=-1 && votedFor_!=args.candidateId) return;                // 根据votedFor_是否被改变来判断-是否投过票 此轮任期是否已经投票(一轮最多投一次)
+    if(votedFor_!=-1 && votedFor_!=args.candidateId) 
+    {
+        std::cout << "[Node " << nodeId_ << "] Vote REJECT: already voted for "
+                  << votedFor_ << ", candidate=" << args.candidateId << std::endl;
+        return;                // 根据votedFor_是否被改变来判断-是否投过票 此轮任期是否已经投票(一轮最多投一次)
+    }
 
     //3. ▲!检查候选者的日志新旧(先比较lastLogtTerm 再比较lastLogIndex)
-    if(log_.LastTerm()>args.lastLogTerm || (log_.LastTerm()==args.lastLogTerm && log_.LastIndex()>args.lastLogIndex)) return;
+    if(log_.LastTerm()>args.lastLogTerm || (log_.LastTerm()==args.lastLogTerm && log_.LastIndex()>args.lastLogIndex)) 
+    {
+        std::cout << "[Node " << nodeId_ << "] Vote REJECT: my log (term="
+                  << log_.LastTerm() << ",idx=" << log_.LastIndex()
+                  << ") newer than candidate's (term=" << args.lastLogTerm
+                  << ",idx=" << args.lastLogIndex << ")" << std::endl;
+        return;
+    }
 
     //4. 投票 + ▲!持久化
     votedFor_ = args.candidateId;
     reply.voteGranted = true;
     
     PersistMeta();
+    
+    std::cout << "[Node " << nodeId_ << "] Vote GRANTED to candidate "
+              << args.candidateId << " term=" << currentTerm_ << std::endl;
 }
 
 //!注意实现逻辑
@@ -250,6 +282,12 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
 
 void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& reply)
 {
+    std::cout << "[Node " << nodeId_ << "] HandleRequestVoteReply from peer="
+              << peerId << " reply.term=" << reply.term
+              << " granted=" << reply.voteGranted
+              << " my.role=" << (role_ == Role::Candidate ? "Candidate" : 
+                                 role_ == Role::Leader ? "Leader" : "Follower")
+              << " my.term=" << currentTerm_ << std::endl;
     //! 检查自己是否还是candidate，否则导致错误的票数记录，甚至多个leader
     //if(!(role_==Role::Candidate)) return;            //! 注意：两次加锁之间，角色可能已经变化，此处必须在锁内检查
     
@@ -389,10 +427,15 @@ void RaftNode::Tick()
 
 void RaftNode::StartElection()
 {
+    std::cout << "[Node " << nodeId_ << "] StartElection" << std::endl;
     RequestVoteArgs args;
     bool becomeLeader = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+
+        // ! 防御：如果已经是 Leader，不需要竞选
+        if (role_ == Role::Leader) return;
+
         BecomeCandidate();                              //内部不加锁，由此处 顶层方法 加锁
 
         //临界区数据需要加锁
@@ -413,23 +456,28 @@ void RaftNode::StartElection()
     if(becomeLeader)
     {
         SendHeartbeat();            //即使没有follower
+        return;
     }
 
     //发送RPC消息不需要加锁(Sendxxx)
     for(int32_t peerId = 0; peerId<totalNodes_; peerId++)
     {
         if(peerId == nodeId_) continue;
-        if(!SendRequestVote(peerId,args))      //发给所有人(除了自己)
-        {
-            //发送失败...
-        }
+        SendRequestVote(peerId,args);      //发给所有人(除了自己)
     }
 }
 
 void RaftNode::BecomeFollower(int64_t newTerm)
 {
+    std::cout << "[Node " << nodeId_ << "] BecomeFollower, term=" << currentTerm_ 
+              << " -> " << newTerm << std::endl;
+
     // 更新role_
     role_ = Role::Follower;
+
+    // !▲ 关键：重置选举计时器
+    electionResetTime_ = std::chrono::steady_clock::now();
+    electionTimeoutMs_ = randomTimeoutMs(150, 300);   // 重新随机
 
     // 更新currentTerm_
     if(newTerm > currentTerm_) 
@@ -446,6 +494,8 @@ void RaftNode::BecomeFollower(int64_t newTerm)
 
 void RaftNode::BecomeCandidate()
 {
+    std::cout << "[Node " << nodeId_ << "] BecomeCandidate, term=" 
+              << (currentTerm_ + 1) << std::endl;
     // 更新role_
     role_ = Role::Candidate;
 
@@ -473,6 +523,8 @@ void RaftNode::BecomeCandidate()
 
 void RaftNode::BecomeLeader()
 {
+    std::cout << "[Node " << nodeId_ << "] BecomeLeader, term=" << currentTerm_ << std::endl;
+
     // 更新role_
     role_ = Role::Leader;
 
@@ -516,13 +568,13 @@ void RaftNode::ApplyCommittedEntries()
     while(lastApplied_ < commitIndex_)
     {
         lastApplied_++;
-        const auto entry_opt = log_.GetEntry(lastApplied_);         // ! 不能使用 const LogEntry& entry = log_.GetEntry(lastApplied_).value(); 
-        if(!entry_opt.has_value())
+        const auto entryOpt = log_.GetEntry(lastApplied_);         // ! 不能使用 const LogEntry& entry = log_.GetEntry(lastApplied_).value(); 
+        if(!entryOpt.has_value())
         {
             //防御：日志突然消失(commitIndex_ > lastIndex())
             break;
         }
-        stateMachine_->Apply(entry_opt.value().command);
+        stateMachine_->Apply(entryOpt.value().command);
     }
     /* !
     log_.GetEntry(lastApplied_) 返回一个临时 std::optional<LogEntry>

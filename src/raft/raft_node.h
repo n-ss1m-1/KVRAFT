@@ -6,17 +6,21 @@
 #include<chrono>
 #include<set>
 
+
 #include "raft_log.h"
-#include "raft_storage.h"
-#include "../kv/kv_store.h"
-#include "raft_transport.h"
-#include "../common/command.h"
-#include "../common/types.h"
+#include "raft_message.h"
+#include "common/types.h"
+#include "common/command.h"
+
+class KVStore;        
+class RaftStorage;    
+class RaftTransport;
 
 
 static constexpr int kHeartbeatIntervalMs_ = 50;         // 每次心跳间隔时间             static:静态类成员(所有对象共享一份值) constexpr：编译器确定值 运行时不能修改
 
-class RaftNode {
+class RaftNode : public std::enable_shared_from_this<RaftNode>      // 回调里要捕获 this 的弱引用，避免悬空 -> 约束： 从此 RaftNode 只能用 std::make_shared 构造，不能栈上构造。
+{
 public:
     RaftNode(int32_t nodeId,
              int32_t totalNodes,
@@ -25,7 +29,8 @@ public:
              std::shared_ptr<KVStore> stateMachine);
 
     // ==================== 客户端接口 ====================
-
+    
+    // Leader专用
     // 提交一条命令，阻塞等待提交完成
     // 返回 true: 已提交并应用；false: 不是 Leader 或超时
     bool Start(const Command& command);
@@ -100,17 +105,17 @@ private:
     // ==================== RPC 发送（Leader 主动调用）（锁外调用）====================
 
     // 向 peerId 发送 RequestVote（内部构造 args，调 transport_）
-    bool SendRequestVote(int32_t peerId,const RequestVoteArgs& args);
+    void SendRequestVote(int32_t peerId,const RequestVoteArgs& args);
 
     // 向 peerId 发送 AppendEntries（内部构造 args，调 transport_）
     // entries 为空时就是心跳
-    bool SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args);
+    void SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args);
 
 
 
     // ==================== 静态配置 ====================
     int32_t nodeId_;                        // 本节点 ID
-    int32_t totalNodes_;                     // 节点总数目(! 包含自己) (! 规定nodeId_即为nextIndex_和matchIndex_的对应下标)
+    int32_t totalNodes_;                     // 节点总数目(! 包含自己) (! 规定nodeId_即为nextIndex_和matchIndex_的对应下标)  ▲多数派阈值基于配置的节点总数，不随存活数变化，避免脑裂
 
     // ==================== 持久化状态（重启后必须保留）====================
     int64_t currentTerm_ = 0;               // 当前任期
