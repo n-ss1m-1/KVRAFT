@@ -1,8 +1,6 @@
-//raft_message_codec.cc
-
 #include<sstream>
 
-#include "raft_message_codec.h"
+#include "raft/raft_message.h"
 
 
 // LogEntry序列化和反序列化   
@@ -64,4 +62,3 @@ std::optional<std::pair<int64_t,int32_t>> DeserializeMeta(const std::string& lin
 
     return std::make_pair(currentTerm,votedFor);                //使用方法(不需要指定模板)! std::make_pair(v1,v2); 
 }
-
