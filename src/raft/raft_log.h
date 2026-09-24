@@ -4,7 +4,7 @@
 
 #include<optional>
 
-#include "raft_message.h"
+#include "raft/raft_message.h"
 
 struct ConsistencyCheckResult
 {

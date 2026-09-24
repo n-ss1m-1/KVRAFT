@@ -1,3 +1,4 @@
+//command.h
 #pragma once
 #include<string>
 #include<optional>
@@ -29,6 +30,6 @@ std::optional<Command> ParseCommand(const std::string& line);
 std::vector<Command> ParseCommand(const std::vector<std::string>& lines);
 
 
-//用于raft_message_codec的序列化和反序列化
+//用于raft_message的序列化和反序列化
 std::string CommandTypeToString(const Command& command);
 std::optional<Command::Type> StringToCommandType(const std::string& type);

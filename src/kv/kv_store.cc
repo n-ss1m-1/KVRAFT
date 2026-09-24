@@ -3,8 +3,8 @@
 #include<iostream>
 #include<sstream>
 
-#include "kv_store.h"
-#include "../common/command.h"
+#include "kv/kv_store.h"
+#include "common/command.h"
 
 
 void KVStore::ApplyPut(const std::string& key,const std::string& value)
