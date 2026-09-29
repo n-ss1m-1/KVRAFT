@@ -39,6 +39,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 # ==================== 源文件分组 ====================
 set(CORE_SOURCES
     src/common/command.cc
+    src/common/thread_pool.cc
     src/kv/kv_store.cc
     src/persist/persister.cc
     src/raft/raft_log.cc
@@ -48,14 +49,15 @@ set(CORE_SOURCES
     src/rpc/rpc_message.cc
     src/rpc/rpc_client.cc
     src/rpc/rpc_server.cc
+    src/client_server/client_server.cc
 )
 
 # ==================== 主程序 ====================
-add_executable(my_kvraft
+add_executable(raft-kv
     src/main.cc
     ${CORE_SOURCES}
 )
-target_link_libraries(my_kvraft ${MUDUO_LIBS})
+target_link_libraries(raft-kv ${MUDUO_LIBS})
 
 # ==================== 测试程序 ====================
 # 每个测试独立编译，只包含被测模块
