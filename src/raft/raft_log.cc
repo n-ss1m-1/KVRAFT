@@ -14,17 +14,21 @@ void RaftLog::AppendEntry(const LogEntry& entry)
 }
 
 bool RaftLog::AppendFrom(const int64_t startIndex,const std::vector<LogEntry>& entries)
-{
-    if(entries.empty()) return true;                 
-    if(startIndex<=0 || startIndex>Size()+1) return false;           //超过范围了 例：Size()=1时 startIndex可以是1或2
+{              
+    // 校验startIndex的范围： 例：Size()=1时 startIndex可以是1或2
+    if(startIndex<=0 || startIndex>Size()+1) return false;           
     
     //!▲ 我的 RaftLog 内部假设：entries_[i].index == i + 1 永远成立。如果外部传入的entries不满足这个规则，则逻辑全乱。   !一定要在截断前检查，否则日志坏了再退出也没用了
     //1. 保证起点对的上 2. 保证内部是连续的index
-    for (size_t i = 0; i < entries.size(); i++) 
+    if(!entries.empty())
     {
-        if (entries[i].index != startIndex + static_cast<int64_t>(i)) return false;
+        for (size_t i = 0; i < entries.size(); i++) 
+        {
+            if (entries[i].index != startIndex + static_cast<int64_t>(i)) return false;
+        }
     }
 
+    //!▲不管entries是否为空 都需要判断是否需要截断
     //先截断
     if(startIndex<=Size()) 
     {

@@ -23,9 +23,9 @@ static int randomTimeoutMs(int low,int high)
 
 RaftNode::RaftNode(int32_t nodeId,
                    int32_t totalNodes,
-                   std::shared_ptr<RaftTransport> transport,
-                   std::shared_ptr<RaftStorage> storage,
-                   std::shared_ptr<KVStore> stateMachine):
+                   const std::shared_ptr<RaftTransport>& transport,
+                   const std::shared_ptr<RaftStorage>& storage,
+                   const std::shared_ptr<KVStore>& stateMachine):
                 nodeId_(nodeId),
                 totalNodes_(totalNodes),
                 log_(RaftLog()),
@@ -146,8 +146,15 @@ void RaftNode::SendHeartbeat()
             args.prevLogTerm = (args.prevLogIndex == 0)     //! prevLogIndex == 0时，GetEntry()返回nullopt
                                ? 0
                                : log_.GetEntry(args.prevLogIndex).value().term;     
+
             args.entries = log_.GetEntries(args.prevLogIndex+1, log_.LastIndex()+1);     //! GetEntries返回临时对象(右值) move()没有效果   //! 左闭右开区间
             args.leaderCommit = commitIndex_;
+
+            std::cout << "[Node " << nodeId_ << " → peer " << peerId
+                      << "] SendHeartbeat: prev=" << args.prevLogIndex
+                      << " entries=" << args.entries.size()
+                      << " leaderCommit=" << args.leaderCommit
+                      << " nextIndex=" << nextIndex_[peerId] << std::endl;
         }
     }
 
@@ -217,6 +224,13 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
 {
     //!读取共享数据需要加锁
     std::lock_guard<std::mutex> lock(mutex_);
+
+    std::cout << "[Node " << nodeId_ << " ← leader " << args.leaderId
+              << "] HandleAppendEntries: term=" << args.term
+              << " prev=" << args.prevLogIndex
+              << " entries=" << args.entries.size()
+              << " leaderCommit=" << args.leaderCommit
+              << " my.LastIndex=" << log_.LastIndex() << std::endl;
     
     reply.success = false;
     reply.term = currentTerm_;      //!覆盖>=<三种情况 刚才漏了=的情况
@@ -246,23 +260,21 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
         return;
     }
 
-    //5. 日志复制(内存+磁盘)
-    if(!args.entries.empty()) 
+    //5. 日志复制(内存+磁盘)           ▲!无论entries是否为空，总是调用下面的方法，因为可能需要日志截断
+    //理论上不应该出错
+    if(!log_.AppendFrom(args.prevLogIndex+1,args.entries))
     {
-        //理论上不应该出错
-        if(!log_.AppendFrom(args.prevLogIndex+1,args.entries))
-        {
-            //! 填入非法值表示严重错误 而非日志冲突
-            reply.conflictIndex = -1;
-            return;
-        }
-        if(!storage_->AppendLogEntries(args.entries))
-        {
-            //! 填入非法值表示严重错误 而非日志冲突
-            reply.conflictIndex = -1;
-            return;
-        }
+        //! 填入非法值表示严重错误 而非日志冲突
+        reply.conflictIndex = -1;
+        return;
     }
+    if(!storage_->AppendLogEntriesFrom(args.prevLogIndex+1,args.entries))       //▲ 截断+追加，保证日志无重复
+    {
+        //! 填入非法值表示严重错误 而非日志冲突
+        reply.conflictIndex = -1;
+        return;
+    }
+    
 
     //6. 更新commitIndex_
     if(args.leaderCommit > commitIndex_)
@@ -344,6 +356,12 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
 
         //2. !再次检查角色
         if(!(role_==Role::Leader)) return;
+
+        std::cout << "[Node " << nodeId_ << "] HandleReply from peer " << peerId
+                  << " success=" << reply.success
+                  << " matchIndex=" << reply.matchIndex
+                  << " conflictIndex=" << reply.conflictIndex
+                  << " → nextIndex=" << nextIndex_[peerId] << std::endl;
 
         //3. success分支
         // 规定nodeId_即为nextIndex_和matchIndex_的对应下标

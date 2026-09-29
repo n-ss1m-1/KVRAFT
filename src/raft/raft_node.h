@@ -24,9 +24,9 @@ class RaftNode : public std::enable_shared_from_this<RaftNode>      // 回调里
 public:
     RaftNode(int32_t nodeId,
              int32_t totalNodes,
-             std::shared_ptr<RaftTransport> transport,
-             std::shared_ptr<RaftStorage> storage,
-             std::shared_ptr<KVStore> stateMachine);
+             const std::shared_ptr<RaftTransport>& transport,
+             const std::shared_ptr<RaftStorage>& storage,
+             const std::shared_ptr<KVStore>& stateMachine);
 
     // ==================== 客户端接口 ====================
     
