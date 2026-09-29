@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include<map>
+
 #include "persist/persister.h"
 #include "raft/raft_message.h"
 
@@ -24,10 +26,10 @@ public:
     std::pair<int64_t,int32_t> LoadMeta();
 
     //=========== 日志 ===========
-    //追加一条日志
+    //追加一条日志(顺序追加)
     bool AppendLogEntry(const LogEntry& entry);
-    //添加多条日志
-    bool AppendLogEntries(const std::vector<LogEntry>& entries);
+    //添加多条日志(覆盖追加)
+    bool AppendLogEntriesFrom(int64_t startIndex,const std::vector<LogEntry>& entries);
     //读取所有日志
     std::vector<LogEntry> LoadLogEntries();
 
@@ -37,6 +39,11 @@ private:
     //▲此处的Persister由RaftStorage私有，不需要外部访问->直接设置为值成员，而非shared_ptr
     Persister metaPersister_;
     Persister logPersister_;
+
+    //保证追加到磁盘的日志不会重复
+    std::map<int64_t,int64_t> indexToOffset_;       // index -> 该日志在文件中的起始字节偏移量
+    int64_t fileSize_ = 0;                          // 当前文件字节数
+    int64_t lastPersistedIndex_ = 0;                // 最后持久化的日志index
 };
 
 

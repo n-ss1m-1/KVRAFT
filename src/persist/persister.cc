@@ -13,7 +13,6 @@ Persister::Persister(const std::string& fileName)
     if(fd_==-1)
     {
         perror("Persister");
-        close(fd_);
     }
 }
 
@@ -74,4 +73,42 @@ std::vector<std::string> Persister::LoadFromFile()      //▲注：返回值而�
         if(!line.empty()) lines.emplace_back(line);
     }
     return lines;
+}
+
+int64_t Persister::CurrentSize() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if(fd_ < 0) return 0;
+
+    struct stat st;
+    if(fstat(fd_,&st) < 0) return 0;            //! 通过fd读取文件元信息，元信息存于st中，失败返回0
+    return static_cast<int64_t>(st.st_size);    //  读取文件元信息：文件字节数 st_size
+}
+
+bool Persister::Truncate(int64_t size)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if(fd_ < 0) return 0;
+
+    //!将文件截断到size字节
+    if(ftruncate(fd_,size) < 0)
+    {
+        perror("ftruncate");
+        return false;
+    }
+    //!强制把内核缓冲区的数据刷到磁盘
+    if(fsync(fd_) < 0)
+    {
+        perror("fsync");
+        return false;
+    }
+
+    return true;
+}
+
+const std::string& Persister::GetFileName() const
+{
+    return fileName_;
 }
