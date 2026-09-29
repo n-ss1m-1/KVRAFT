@@ -11,9 +11,9 @@ enum class Role
     Follower
 };
 
-struct peerInfo
+struct PeerInfo
 {
     int32_t peerId;
     std::string host;
-    int port;
+    uint16_t port;
 };

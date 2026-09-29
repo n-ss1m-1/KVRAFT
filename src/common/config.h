@@ -8,30 +8,29 @@
 
 namespace config
 {
-    //集群拓扑(含自己)
-    inline const std::vector<peerInfo> kCluster = 
+    struct NodeConfig
     {
-        // nodeId, host, port
-        {0, "127.0.0.1", 9001},
-        {1, "127.0.0.1", 9002},
-        {2, "127.0.0.1", 9003},
+        PeerInfo peerInfo;
+        uint16_t clientServerPort;
+    };
+    //集群拓扑(含自己)
+    inline const std::vector<NodeConfig> kCluster = 
+    {
+        // {{nodeId, host, port},clientServerPort}
+        {{0, "127.0.0.1", 9001},8001},
+        {{1, "127.0.0.1", 9002},8002},
+        {{2, "127.0.0.1", 9003},8003},
     };
 
     //数据目录前缀(实际路径 = kDataDirPrefix + "/node" + nodeId)
     inline constexpr const char* kDataDirPrefix = "data";
 
     //Raft时间参数
-    inline constexpr int kHeatbeatIntervalMs   = 50;
+    inline constexpr int kHeartbeatIntervalMs   = 50;
     inline constexpr int kElectionTimeoutMinMs = 150;
     inline constexpr int kElectionTimeoutMaxMs = 300;
 
 };
-
-
-
-
-
-
 
 
 
