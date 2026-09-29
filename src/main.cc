@@ -20,6 +20,8 @@
 #include "rpc/rpc_client.h"
 #include "raft/raft_node.h"
 #include "rpc/rpc_server.h"
+#include "common/thread_pool.h"
+#include "client_server/client_server.h"
 
 //声明全局EventLoop + 信号处理函数
 muduo::net::EventLoop* g_loop = nullptr;
@@ -80,10 +82,13 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
     std::shared_ptr<RaftStorage> storage = std::make_shared<RaftStorage>(dataDir);
 
     //初始化RpcClient
-    std::vector<peerInfo> peers;
-    for(const peerInfo& peer:cluster)
+    std::vector<PeerInfo> peers;
+    uint16_t clientServerPort = 0;
+    for(const config::NodeConfig& nodeConfig:cluster)
     {
-        if(peer.peerId != nodeId) peers.push_back(peer);        //除了自己以外的连接对象
+        PeerInfo peer = nodeConfig.peerInfo;
+        if(peer.peerId != nodeId)   peers.push_back(peer);        //除了自己以外的连接对象
+        else                        clientServerPort = nodeConfig.clientServerPort;
     }
     std::shared_ptr<RpcClient> rpcClient = std::make_shared<RpcClient>(&loop,peers);
 
@@ -98,16 +103,23 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
 
 
     //初始化RpcServer
-    int32_t raftPort = cluster[nodeId].port;
+    int32_t raftPort = cluster[nodeId].peerInfo.port;
     std::shared_ptr<RpcServer> rpcServer = std::make_shared<RpcServer>(&loop,raftPort,raftNode.get());
     rpcServer->Start();
+
+    //初始化线程池
+    std::shared_ptr<ThreadPool> threadPool = std::make_shared<ThreadPool>(4);
+
+    //初始化ClientServer + 启动
+    std::shared_ptr<ClientServer> clientServer = std::make_shared<ClientServer>(&loop,clientServerPort,kvStore,raftNode,threadPool);
+    clientServer->Start();          
 
     //初始化Tick定时器线程
     std::atomic<bool> running{true};                    //! {} 避免了"most vexing parse"陷阱
     std::thread timerThread([&running, raftNode](){     //atomic不允许拷贝只能引用 | 拷贝raftnode，引用计数+1，保证raftnode比timer活的久
+        std::this_thread::sleep_for(std::chrono::seconds(3));           //启动时先睡眠3s，避免未连接到peer导致的term疯涨   TODO：RpcClient成员方法，连接建立后再开始选举(最多等待3s)
         while(running.load())
         {
-            std::this_thread::sleep_for(std::chrono::seconds(3));           //启动时先睡眠3s，避免未连接到peer导致的term疯涨   TODO：RpcClient成员方法，连接建立后再开始选举(最多等待3s)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             raftNode->Tick();
         }
@@ -118,7 +130,8 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
     std::cout << "[Main] Node " << nodeId << " started\n";
     std::cout << "[Main] Raft port: " << raftPort << "\n";
     std::cout << "[Main] Data dir:  " << dataDir << "\n";
-    for (const auto& p : cluster) {
+    for (const auto& nodeConfig : cluster) {
+        const auto& p = nodeConfig.peerInfo;
         std::cout << "[Main]   peer " << p.peerId << " -> "
                   << p.host << ":" << p.port
                   << (p.peerId == nodeId ? " (self)" : "") << "\n";
@@ -136,6 +149,9 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
 
     rpcClient->Stop();          
 
+    clientServer.reset();       //! 先销毁clientServer->不再提交新任务  再销毁线程池->执行完所有任务自动关闭
+    threadPool.reset();         // 生命周期：ClientServer < ThreadPool
+    
     rpcServer.reset();
     rpcClient.reset();
     raftNode.reset();           //▲! 生命周期要求：RaftNode>RpcServer(RpcServer持有node裸指针) && RaftNode>=RpcClient(RpcClient需要借助node运行回调) && RaftNode>timerThread(timer会一直调用node的成员函数)
