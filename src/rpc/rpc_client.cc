@@ -2,12 +2,14 @@
 
 #include<sstream>
 #include<iostream>
+#include<sys/socket.h>
+#include<netinet/tcp.h>
 
 #include "rpc/rpc_client.h"
 
 
 //!▲ 理解回调函数和unique_ptr?
-RpcClient::RpcClient(muduo::net::EventLoop* loop,const std::vector<peerInfo>& peers):
+RpcClient::RpcClient(muduo::net::EventLoop* loop,const std::vector<PeerInfo>& peers):
     peers_(),
     loop_(loop)
 {
@@ -19,6 +21,8 @@ RpcClient::RpcClient(muduo::net::EventLoop* loop,const std::vector<peerInfo>& pe
         //构造TcpClient
         pc->client = std::make_unique<muduo::net::TcpClient>(
             loop, muduo::net::InetAddress(info.host,info.port), "RpcClient-"+std::to_string(info.peerId));
+
+        pc->client->enableRetry();      //!▲ 启用自动重连
 
         pc->conn = nullptr;
         
@@ -41,6 +45,9 @@ RpcClient::RpcClient(muduo::net::EventLoop* loop,const std::vector<peerInfo>& pe
         
         //连接
         pc->client->connect();          //异步
+
+        pc->lastResponseTime = std::chrono::steady_clock::now();
+        pc->lastSendTime = std::chrono::steady_clock::now();
         
         //存入连接池
         peers_[info.peerId] = std::move(pc);
@@ -78,13 +85,19 @@ void RpcClient::SendRequestVote(int32_t peerId,const RequestVoteArgs& args,Reque
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = peers_.find(peerId);                  //! 使用find 避免避免不存在时插入默认值
-        if(it!=peers_.end() && it->second->conn)        //! 1.连接存在  2.连接已建立
+        if(it!=peers_.end())                            //! 1.连接存在  
         {
-            reqId = nextReqId_++;
-            conn = it->second->conn;                    //! 提前拷贝需要的conn和codec，后续要发送不再需要加锁
-            codec = it->second->codec.get();
-            pendingVoteCallbacks_[reqId] = {peerId,std::move(cb)};
-            ok = true;
+            CheckPeerHealth(peerId, it->second.get());  //! 2.连接健康
+            if(it->second->conn)                        //! 3.连接已建立
+            {
+                reqId = nextReqId_++;
+                conn = it->second->conn;                    //! 提前拷贝需要的conn和codec，后续要发送不再需要加锁
+                codec = it->second->codec.get();
+                pendingVoteCallbacks_[reqId] = {peerId,std::move(cb)};
+                // ★ 更新发送时间
+                it->second->lastSendTime = std::chrono::steady_clock::now();
+                ok = true;
+            }
         }
     }
 
@@ -110,14 +123,21 @@ void RpcClient::SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args,A
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = peers_.find(peerId);                  //! 使用find 避免避免不存在时插入默认值
-        if(it!=peers_.end() && it->second->conn)        //! 1.连接存在  2.连接已建立
+        auto it = peers_.find(peerId);                      //! 使用find 避免避免不存在时插入默认值
+        if(it!=peers_.end())                            //! 1.连接存在  
         {
-            reqId = nextReqId_++;
-            conn = it->second->conn;                    //! 提前拷贝需要的conn和codec，后续要发送不再需要加锁
-            codec = it->second->codec.get();
-            pendingAppendCallbacks_[reqId] = {peerId,std::move(cb)};     //! move避免拷贝开销
-            ok = true;
+            CheckPeerHealth(peerId, it->second.get());  //! 2.连接健康
+            if(it->second->conn)                        //! 3.连接已建立
+            {
+                reqId = nextReqId_++;
+                conn = it->second->conn;                    //! 提前拷贝需要的conn和codec，后续要发送不再需要加锁
+                codec = it->second->codec.get();
+                pendingAppendCallbacks_[reqId] = {peerId,std::move(cb)};     //! move避免拷贝开销
+                // ★ 更新发送时间
+                it->second->lastSendTime = std::chrono::steady_clock::now();
+                ok = true;
+            }
+            
         }
     }
 
@@ -132,6 +152,29 @@ void RpcClient::SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args,A
     std::string msg = SerializeAppendEntriesArgs(reqId,args);
     codec->send(conn.get(),msg);
     
+}
+
+// 调用前必须已持锁
+void RpcClient::CheckPeerHealth(int32_t peerId, RpcClient::peerConn* pc)
+{
+    auto now = std::chrono::steady_clock::now();
+    
+    // 只有"发过但没回"才检查
+    if (pc->lastSendTime <= pc->lastResponseTime) return;
+    
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - pc->lastSendTime).count();
+    
+    if (elapsed > 10) {
+        std::cout << "[RpcClient] peer " << peerId
+                  << " unresponsive for " << elapsed << "s, force reconnect"
+                  << std::endl;
+        if (pc->conn) {
+            pc->conn->forceClose();   // muduo 会自动重连
+            pc->conn.reset();
+        }
+        pc->lastSendTime = now;
+        pc->lastResponseTime = now;   // 重置，避免连击
+    }
 }
 
 //四种可能：1. 连接请求 2. 本端正常关闭 3. 本端异常关闭 4. 对端网络抖动
@@ -198,6 +241,16 @@ void RpcClient::handleReply(int32_t peerId, const std::string& msg)
 {
     std::cout << "[RpcClient] reply from peer " << peerId
               << ", raw=" << msg.substr(0, 60) << std::endl;
+
+    //  更新最后响应时间
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = peers_.find(peerId);
+        if (it != peers_.end()) {
+            it->second->lastResponseTime = std::chrono::steady_clock::now();
+        }
+    }
+              
     std::istringstream iss(msg);
     uint32_t typeNum;
     uint64_t reqId;

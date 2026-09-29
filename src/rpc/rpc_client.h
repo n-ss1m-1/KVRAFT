@@ -16,7 +16,7 @@
 class RpcClient : public RaftTransport
 {
 public:
-    RpcClient(muduo::net::EventLoop* loop,const std::vector<peerInfo>& peers);
+    RpcClient(muduo::net::EventLoop* loop,const std::vector<PeerInfo>& peers);
     ~RpcClient();
     void Stop();
     void SendRequestVote(int32_t peerId,const RequestVoteArgs& args,RequestVoteCallback cb) override;            //const &或者 值传递 才能接收lambda表达式
@@ -29,6 +29,12 @@ private:
         std::unique_ptr<muduo::net::TcpClient> client;
         muduo::net::TcpConnectionPtr conn;
         std::unique_ptr<LengthHeaderCodec> codec;
+
+        //  新增：最后一次收到该 peer 回复的时间
+        std::chrono::steady_clock::time_point lastResponseTime;
+    
+        //  新增：最后一次发送的时间（用于检测"发了但没回"）
+        std::chrono::steady_clock::time_point lastSendTime;
     };
     struct PendingVote
     {
@@ -41,6 +47,8 @@ private:
         AppendEntriesCallback cb;
     };
     
+    void CheckPeerHealth(int32_t peerId, RpcClient::peerConn* pc);      // 调用前必须已持锁
+
     void OnConnection(int32_t peerId,peerConn* pc,const muduo::net::TcpConnectionPtr& conn);        //?
 
     void handleReply(int32_t peerId, const std::string& msg);
