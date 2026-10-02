@@ -10,7 +10,7 @@ std::string SerializeLogEntry(const LogEntry& entry)
     std::ostringstream oss;
     oss <<entry.index<<" "
         <<entry.term<<" "
-        <<CommandTypeToString(entry.command)<<" "
+        <<CommandTypeToString(entry.command.type)<<" "
         <<entry.command.key;
     if(entry.command.type==Command::Type::PUT) oss<<" "<<entry.command.value;       //!空格在此处输入 不能在key后输入 避免没有value时多一个空格
     

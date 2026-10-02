@@ -3,14 +3,15 @@
 #include<string>
 #include<optional>
 #include<vector>
+#include<cstdint>
 
 struct Command
 {
-    enum class Type
+    enum class Type : uint32_t
     {
-        PUT,
-        GET,
-        DEL
+        PUT     = 0,
+        GET     = 1,
+        DEL     = 2
     };
 
     Command()=default;
@@ -31,5 +32,5 @@ std::vector<Command> ParseCommand(const std::vector<std::string>& lines);
 
 
 //用于raft_message的序列化和反序列化
-std::string CommandTypeToString(const Command& command);
+std::string CommandTypeToString(const Command::Type& type);
 std::optional<Command::Type> StringToCommandType(const std::string& type);

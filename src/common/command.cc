@@ -37,9 +37,9 @@ std::vector<Command> ParseCommand(const std::vector<std::string>& lines)
     return commands;
 }
 
-std::string CommandTypeToString(const Command& command)
+std::string CommandTypeToString(const Command::Type& type)
 {
-    switch (command.type)
+    switch (type)
     {
         case Command::Type::PUT:
             return "PUT";
