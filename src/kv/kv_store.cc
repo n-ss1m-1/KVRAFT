@@ -1,6 +1,5 @@
 //kv_store.cc
 
-#include<iostream>
 #include<sstream>
 
 #include "kv/kv_store.h"
@@ -43,7 +42,6 @@ void KVStore::Apply(const Command& command)
         case Command::Type::DEL: 
         {
             bool result=ApplyDelete(command.key);
-            //if(!result) std::cout<<"This key isn't exist"<<std::endl;
             break;
         }
     }

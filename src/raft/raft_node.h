@@ -86,6 +86,7 @@ public:
     bool IsLeader() const;
     bool IsCandidate() const;
     Role GetRole() const;
+    const std::string RoleName(Role& role) const;
     int64_t GetCurrentTerm() const;
     int32_t GetLeaderId() const;
 

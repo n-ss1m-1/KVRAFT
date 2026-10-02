@@ -1,9 +1,9 @@
 //rpc_client.cc
 
 #include<sstream>
-#include<iostream>
 #include<sys/socket.h>
 #include<netinet/tcp.h>
+#include<spdlog/spdlog.h>
 
 #include "rpc/rpc_client.h"
 
@@ -165,9 +165,7 @@ void RpcClient::CheckPeerHealth(int32_t peerId, RpcClient::peerConn* pc)
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - pc->lastSendTime).count();
     
     if (elapsed > 10) {
-        std::cout << "[RpcClient] peer " << peerId
-                  << " unresponsive for " << elapsed << "s, force reconnect"
-                  << std::endl;
+        spdlog::warn("[RpcClient] peer {} unresponsive for {}s, force reconnect",peerId,elapsed);
         if (pc->conn) {
             pc->conn->forceClose();   // muduo 会自动重连
             pc->conn.reset();
@@ -180,17 +178,15 @@ void RpcClient::CheckPeerHealth(int32_t peerId, RpcClient::peerConn* pc)
 //四种可能：1. 连接请求 2. 本端正常关闭 3. 本端异常关闭 4. 对端网络抖动
 void RpcClient::OnConnection(int32_t peerId,peerConn* pc,const muduo::net::TcpConnectionPtr& conn)
 {
-    std::cout << "[RpcClient] peer " << peerId
-              << (conn->connected() ? " CONNECTED" : " DISCONNECTED")
-              << std::endl;
     if(conn->connected())
     {
-        
+        spdlog::info("[RpcClient] peer {} CONNECTED",peerId);
         std::lock_guard<std::mutex> lock(mutex_);       //! pc->conn 会被SendRequestVote读取：加锁保护
         pc->conn = conn;                                //连接建立：保存连接
     }
     else
     {
+        spdlog::info("[RpcClient] peer {} DISCONNECTED",peerId);
         std::vector<RequestVoteCallback> failVoteCallbacks;
         std::vector<AppendEntriesCallback> failAppendCallbacks;
         {    
@@ -239,9 +235,6 @@ void RpcClient::OnConnection(int32_t peerId,peerConn* pc,const muduo::net::TcpCo
 
 void RpcClient::handleReply(int32_t peerId, const std::string& msg)
 {
-    std::cout << "[RpcClient] reply from peer " << peerId
-              << ", raw=" << msg.substr(0, 60) << std::endl;
-
     //  更新最后响应时间
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -258,41 +251,61 @@ void RpcClient::handleReply(int32_t peerId, const std::string& msg)
 
     RpcMessageType type = static_cast<RpcMessageType>(typeNum);
 
-
+    spdlog::trace("[RpcClient] reply from peer {}, type={},reqId={}",peerId,(type==RpcMessageType::kRequestVoteReply?"RequestVoteReply":"AppendEntriesReply"),reqId);
     //分发消息处理
     switch (type)
     {
         case RpcMessageType::kRequestVoteReply:
         {
             auto replyOpt = DeserializeRequestVoteReply(iss);
-            if(!replyOpt.has_value()) return;
+            if(!replyOpt.has_value()) 
+            {
+                spdlog::warn("[RpcClient] peer {}, reqId={}, deserialize RequestVoteReply failed",peerId,reqId);
+                return;
+            }
+            auto& reply = replyOpt.value();
+            spdlog::debug("[RpcClient] RequestVoteReply peer={}, reqId={}, term={}, voteGranted={}",peerId,reqId,reply.term,reply.voteGranted);
 
             RequestVoteCallback cb;
             {
                 std::lock_guard<std::mutex> lock(mutex_);               //!加锁保护临界区 callbacks_
                 auto it = pendingVoteCallbacks_.find(reqId);        //!使用find，避免不存在时插入默认值
-                if(it==pendingVoteCallbacks_.end()) return;         
+                if(it==pendingVoteCallbacks_.end()) 
+                {
+                    spdlog::warn("[RpcClient] unexpected reply from peer {} reqId={}",peerId, reqId);
+                    return;
+                }         
                 cb=std::move(it->second.cb);
                 pendingVoteCallbacks_.erase(it);
             }
-            cb(replyOpt.value());                                   //!锁外执行cb
+            cb(reply);                                   //!锁外执行cb
 
             break;
         }
         case RpcMessageType::kAppendEntriesReply:
         {
             auto replyOpt = DeserializeAppendEntriesReply(iss);
-            if(!replyOpt.has_value()) return;
+            if(!replyOpt.has_value()) 
+            {
+                spdlog::warn("[RpcClient] peer {}, reqId={}, deserialize AppendEntriesReply failed",peerId,reqId);
+                return;
+            }
 
+            auto& reply = replyOpt.value();
+            spdlog::debug("[RpcClient] AppendEntriesReply peer={}, reqId={}, term={}, success={}, matchIndex={},conflictIndex={}",peerId,reqId,reply.term,reply.success,reply.matchIndex,reply.conflictIndex);
             AppendEntriesCallback cb;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto it = pendingAppendCallbacks_.find(reqId);
-                if(it==pendingAppendCallbacks_.end()) return;
+                if(it==pendingAppendCallbacks_.end()) 
+                {
+                    spdlog::warn("[RpcClient] unexpected reply from peer {} reqId={}",peerId, reqId);
+                    return;
+                }
                 cb=std::move(it->second.cb);
                 pendingAppendCallbacks_.erase(it);
             }
-            cb(replyOpt.value());
+            cb(reply);
 
             break;
         }

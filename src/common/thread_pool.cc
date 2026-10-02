@@ -1,7 +1,8 @@
 //thread_pool.cc
 
 #include<algorithm>
-#include<iostream>
+
+#include<spdlog/spdlog.h>
 
 #include "common/thread_pool.h"
 
@@ -82,11 +83,11 @@ void ThreadPool::WorkerLoop()
         }
         catch(const std::exception& e)
         {
-            std::cerr << "[ThreadPool] Task threw: " << e.what() << std::endl;
+            spdlog::error("[ThreadPool] Task threw: {}", e.what());
         }
         catch(...)
         {
-            std::cerr << "[ThreadPool] Task threw unknown exception" << std::endl;
+            spdlog::error("[ThreadPool] Task threw unknown exception");
         }
     }
 }

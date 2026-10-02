@@ -2,7 +2,8 @@
 #include<random>
 #include<stdexcept>
 #include<algorithm>
-#include<iostream>
+
+#include<spdlog/spdlog.h>
 
 #include "kv/kv_store.h"
 #include "raft/raft_storage.h"
@@ -150,11 +151,8 @@ void RaftNode::SendHeartbeat()
             args.entries = log_.GetEntries(args.prevLogIndex+1, log_.LastIndex()+1);     //! GetEntries返回临时对象(右值) move()没有效果   //! 左闭右开区间
             args.leaderCommit = commitIndex_;
 
-            std::cout << "[Node " << nodeId_ << " → peer " << peerId
-                      << "] SendHeartbeat: prev=" << args.prevLogIndex
-                      << " entries=" << args.entries.size()
-                      << " leaderCommit=" << args.leaderCommit
-                      << " nextIndex=" << nextIndex_[peerId] << std::endl;
+            spdlog::debug("[Node(Leader) {} -> peer {}] SendHeartbeat: term={}, prevLog={}  entries.size={} leaderCommit={}",
+                nodeId_, peerId, currentTerm_, args.prevLogIndex, args.prevLogTerm, args.entries.size(), args.leaderCommit);
         }
     }
 
@@ -170,9 +168,9 @@ void RaftNode::SendHeartbeat()
 
 void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& reply)
 {
-    std::cout << "[Node " << nodeId_ << "] HandleRequestVote from candidate="
-              << args.candidateId << " args.term=" << args.term
-              << " my.term=" << currentTerm_ << std::endl;
+    spdlog::debug("[Node {} <- {}] RequestVote term={}, lastLog=({},{}), my.term={}, my.role={}, votedFor={}",
+        nodeId_, args.candidateId, args.term, args.lastLogTerm, args.lastLogIndex, currentTerm_, RoleName(role_), votedFor_);
+    
     //此处为顶层函数 -> 加锁
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -182,8 +180,9 @@ void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& 
     //1. 检查term
     if(args.term<currentTerm_)            //▲! 过时的候选者不能成为Leader
     {
-        std::cout << "[Node " << nodeId_ << "] Vote REJECT: args.term="
-                  << args.term << " < my.term=" << currentTerm_ << std::endl;
+        spdlog::debug("[Node {}] Vote REJECT: args.term={} < my.term={}",
+            nodeId_, args.term, currentTerm_);
+
         reply.term = currentTerm_;
         return;                             
     }
@@ -194,18 +193,16 @@ void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& 
     //2. 检查是否已投过票(▲!可以重复投给同一候选者_消息丢失_幂等无影响)
     if(votedFor_!=-1 && votedFor_!=args.candidateId) 
     {
-        std::cout << "[Node " << nodeId_ << "] Vote REJECT: already voted for "
-                  << votedFor_ << ", candidate=" << args.candidateId << std::endl;
+        spdlog::debug("[Node {}] Vote REJECT: already voted for {}",
+            nodeId_, votedFor_);
         return;                // 根据votedFor_是否被改变来判断-是否投过票 此轮任期是否已经投票(一轮最多投一次)
     }
 
     //3. ▲!检查候选者的日志新旧(先比较lastLogtTerm 再比较lastLogIndex)
     if(log_.LastTerm()>args.lastLogTerm || (log_.LastTerm()==args.lastLogTerm && log_.LastIndex()>args.lastLogIndex)) 
     {
-        std::cout << "[Node " << nodeId_ << "] Vote REJECT: my log (term="
-                  << log_.LastTerm() << ",idx=" << log_.LastIndex()
-                  << ") newer than candidate's (term=" << args.lastLogTerm
-                  << ",idx=" << args.lastLogIndex << ")" << std::endl;
+        spdlog::debug("[Node {}] Vote REJECT: my log (term={},idx={}) newer than candidate's (term={},idx={}",
+            nodeId_, log_.LastTerm(), log_.LastIndex(), args.lastLogTerm, args.lastLogIndex);
         return;
     }
 
@@ -215,8 +212,7 @@ void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& 
     
     PersistMeta();
     
-    std::cout << "[Node " << nodeId_ << "] Vote GRANTED to candidate "
-              << args.candidateId << " term=" << currentTerm_ << std::endl;
+    spdlog::info("[Node {}] Vote GRANTED to candidate {} term={}",nodeId_,args.candidateId,currentTerm_);
 }
 
 //!注意实现逻辑
@@ -224,20 +220,18 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
 {
     //!读取共享数据需要加锁
     std::lock_guard<std::mutex> lock(mutex_);
-
-    std::cout << "[Node " << nodeId_ << " ← leader " << args.leaderId
-              << "] HandleAppendEntries: term=" << args.term
-              << " prev=" << args.prevLogIndex
-              << " entries=" << args.entries.size()
-              << " leaderCommit=" << args.leaderCommit
-              << " my.LastIndex=" << log_.LastIndex() << std::endl;
     
     reply.success = false;
     reply.term = currentTerm_;      //!覆盖>=<三种情况 刚才漏了=的情况
+
+    spdlog::debug("[Node {} ← leader {}] AppendEntries term={}, prevLog=({},{}), entries.size={}, leaderCommit={}, my.term={}, my.lastLog=({},())",
+        nodeId_, args.leaderId, args.term, args.prevLogTerm, args.prevLogIndex, args.entries.size(), args.leaderCommit, currentTerm_, log_.LastTerm(), log_.LastIndex());
     
     //1. 检查term
     if(currentTerm_ > args.term) 
     {
+        spdlog::debug("[Node {}] reject AppendEntries: stale term {} < {} = my.term",
+            nodeId_, args.term, currentTerm_);
         return;                     //过期的Leader
     }
     if(currentTerm_ < args.term) 
@@ -256,6 +250,9 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
     auto check = log_.CheckConsistency(args.prevLogIndex,args.prevLogTerm);
     if(!check.ok)
     {
+        spdlog::debug("[Node {}] consistency FAIL: prevLog=({},{}), my.lastLog=({},{}), conflictIndex={}",
+            nodeId_, args.prevLogTerm,args.prevLogIndex, log_.LastTerm(),log_.LastIndex(), check.conflictIndex);
+
         reply.conflictIndex = check.conflictIndex;
         return;
     }
@@ -264,24 +261,33 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
     //理论上不应该出错
     if(!log_.AppendFrom(args.prevLogIndex+1,args.entries))
     {
+        spdlog::error("[Node {}] log.AppendFrom FAILED: startIndex={}, entries.size={}",
+            nodeId_, args.prevLogIndex+1,args.entries.size());
         //! 填入非法值表示严重错误 而非日志冲突
         reply.conflictIndex = -1;
         return;
     }
     if(!storage_->AppendLogEntriesFrom(args.prevLogIndex+1,args.entries))       //▲ 截断+追加，保证日志无重复
     {
+        spdlog::error("[Node {}] storage.AppendLogEntriesFrom FAILED: startIndex={}, entries.size={}",
+            nodeId_, args.prevLogIndex+1,args.entries.size());
         //! 填入非法值表示严重错误 而非日志冲突
         reply.conflictIndex = -1;
         return;
     }
     
+    if(!args.entries.empty()) spdlog::debug("[Node {}] appended {} entries, new lastLogIndex={}",
+        nodeId_, args.entries.size(), log_.LastIndex());
 
     //6. 更新commitIndex_
+    int64_t oldCommit = commitIndex_;
     if(args.leaderCommit > commitIndex_)
     {
         //新的commitIndex不能超过自己的LastIndex(Leader已提交的日志可能我还没有)
         commitIndex_ = std::min(args.leaderCommit,log_.LastIndex());
     }
+    if(commitIndex_ > oldCommit) spdlog::debug("[Node {}] commitIndex: {} -> {}", 
+        nodeId_, oldCommit, commitIndex_);
     
 
     //7. 应用到状态机
@@ -294,12 +300,6 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
 
 void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& reply)
 {
-    std::cout << "[Node " << nodeId_ << "] HandleRequestVoteReply from peer="
-              << peerId << " reply.term=" << reply.term
-              << " granted=" << reply.voteGranted
-              << " my.role=" << (role_ == Role::Candidate ? "Candidate" : 
-                                 role_ == Role::Leader ? "Leader" : "Follower")
-              << " my.term=" << currentTerm_ << std::endl;
     //! 检查自己是否还是candidate，否则导致错误的票数记录，甚至多个leader
     //if(!(role_==Role::Candidate)) return;            //! 注意：两次加锁之间，角色可能已经变化，此处必须在锁内检查
     
@@ -308,25 +308,43 @@ void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& re
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        if(!(role_==Role::Candidate)) return;        //! 必须锁内检查
+        if(!(role_==Role::Candidate)) 
+        {
+            spdlog::debug("[Node {}] ignore vote reply from {}: not candidate, currentRole={}",
+                nodeId_, peerId, RoleName(role_));
+            return;        //! 必须锁内检查
+        }
 
         //Leader一定是任期最大者
         if(currentTerm_ < reply.term) 
         {
+            spdlog::warn("[Node {}] vote reply from {} has higher term {} > {} = my.term, stepping down",
+                nodeId_, peerId, reply.term, currentTerm_);
             BecomeFollower(reply.term);
             return;                         //! 后续不再判断
         }
-        if(currentTerm_>reply.term) return;         //▲! 过期的回复
+        if(currentTerm_>reply.term) 
+        {
+            spdlog::debug("[Node {}] ignore stale vote reply from {} (term={} < {} = my.term)",
+                nodeId_, peerId, reply.term, currentTerm_);
+            return;         //▲! 过期的回复
+        }
 
         //投票 -> 累计 -> 判断是否过半 -> 成为Leader
         if(reply.voteGranted)
         {
             votesReceived_.insert(peerId);
+            spdlog::info("[Node {}] got vote from {}, total={}/{}",
+                nodeId_, peerId, votesReceived_.size(), totalNodes_);
             if(votesReceived_.size()>totalNodes_/2) 
             {
                 BecomeLeader();
                 becomeLeader = true;
             }
+        }
+        else
+        {
+            spdlog::debug("[Node {}] vote Denied by {}",nodeId_, peerId);
         }
     }
 
@@ -349,6 +367,8 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         //1. 检查term (判断是否为过期的Leader)
         if(currentTerm_ < reply.term) 
         {
+            spdlog::warn("[Node {}(Leader)] reply from {} higher term {} > {} = my.term, stepping down",
+                nodeId_, peerId, reply.term, currentTerm_);
             BecomeFollower(reply.term);      //内部会更新currentTerm_  所以要后赋值term
         }
 
@@ -357,18 +377,18 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         //2. !再次检查角色
         if(!(role_==Role::Leader)) return;
 
-        std::cout << "[Node " << nodeId_ << "] HandleReply from peer " << peerId
-                  << " success=" << reply.success
-                  << " matchIndex=" << reply.matchIndex
-                  << " conflictIndex=" << reply.conflictIndex
-                  << " → nextIndex=" << nextIndex_[peerId] << std::endl;
+        //spdlog::info("[Node {}] HandleReply from peer {} success={} matchIndex={} conflictIndex={} → nextIndex={}",nodeId_,peerId,reply.success,reply.matchIndex,reply.conflictIndex,nextIndex_[peerId]);
 
         //3. success分支
         // 规定nodeId_即为nextIndex_和matchIndex_的对应下标
         if(reply.success)
         {
+            int64_t oldMatch = matchIndex_[peerId];
             matchIndex_[peerId] = reply.matchIndex;
             nextIndex_[peerId] = matchIndex_[peerId] + 1;
+
+            spdlog::debug("[Node {}(leader)] <- peer {} ACK Append: matchIndex {} -> {}, nextIndex={}",
+                nodeId_, peerId, oldMatch, matchIndex_[peerId], nextIndex_[peerId]);
 
             int64_t oldCommitIndex = commitIndex_;
             UpdateCommitIndex();                            //! 每次收到follower提交 -> 检查是否达到大多数 -> 即检查是否达成共识
@@ -379,7 +399,10 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         }
         else
         {
+            int64_t oldNext = nextIndex_[peerId];
             nextIndex_[peerId] = reply.conflictIndex;
+            spdlog::debug("[Node {}(Leader)] <- peer {} REJECT Append, nextIndex: {} -> {} (conflictIndex={})", 
+                nodeId_, peerId, oldNext, nextIndex_[peerId], reply.conflictIndex);
             //needRetry = true;
 
             //args.term = currentTerm_;
@@ -445,7 +468,8 @@ void RaftNode::Tick()
 
 void RaftNode::StartElection()
 {
-    std::cout << "[Node " << nodeId_ << "] StartElection" << std::endl;
+    spdlog::info("[Node {}] StartElection",nodeId_);
+
     RequestVoteArgs args;
     bool becomeLeader = false;
     {
@@ -487,8 +511,8 @@ void RaftNode::StartElection()
 
 void RaftNode::BecomeFollower(int64_t newTerm)
 {
-    std::cout << "[Node " << nodeId_ << "] BecomeFollower, term=" << currentTerm_ 
-              << " -> " << newTerm << std::endl;
+    spdlog::info("[Node {}] {} -> Follower, term: {} -> {}",
+        nodeId_, RoleName(role_), currentTerm_, newTerm);          
 
     // 更新role_
     role_ = Role::Follower;
@@ -505,6 +529,8 @@ void RaftNode::BecomeFollower(int64_t newTerm)
 
         //! 持久化不能少 每次修改meta这两个属性都需要持久化
         PersistMeta();
+
+        spdlog::debug("[Node {}] updated term={}, votedFor reset",nodeId_,currentTerm_);
     }
 
     // nextIndex_和matchIndex_等待重新成为Leader后再初始化覆盖
@@ -512,8 +538,9 @@ void RaftNode::BecomeFollower(int64_t newTerm)
 
 void RaftNode::BecomeCandidate()
 {
-    std::cout << "[Node " << nodeId_ << "] BecomeCandidate, term=" 
-              << (currentTerm_ + 1) << std::endl;
+    spdlog::info("[Node {}] {} -> Candidate, term={},lastLog=({},{})",
+        nodeId_,RoleName(role_),currentTerm_+1,log_.LastTerm(),log_.LastIndex());
+
     // 更新role_
     role_ = Role::Candidate;
 
@@ -541,8 +568,8 @@ void RaftNode::BecomeCandidate()
 
 void RaftNode::BecomeLeader()
 {
-    std::cout << "[Node " << nodeId_ << "] BecomeLeader, term=" << currentTerm_ << std::endl;
-
+    spdlog::info("[Node {}] {} -> ** Leader **, term={},commitIndex={},lastLog=({},{})",
+        nodeId_,RoleName(role_),currentTerm_,commitIndex_,log_.LastTerm(),log_.LastIndex());
     // 更新role_
     role_ = Role::Leader;
 
@@ -557,6 +584,14 @@ void RaftNode::BecomeLeader()
     matchIndex_[nodeId_] = log_.LastIndex();
 
     //! 锁内：此处不能调用SendHeartbeat();
+
+    //记录每个peer的初始nextIndex
+    for(int i=0; i<totalNodes_; i++) 
+    {
+        if (i != nodeId_) 
+        spdlog::debug("[Node {}] init nextIndex[{}]={}, matchIndex[{}]={}",
+                    nodeId_, i, nextIndex_[i], i, matchIndex_[i]);
+    }
 }
 
 
@@ -589,10 +624,17 @@ void RaftNode::ApplyCommittedEntries()
         const auto entryOpt = log_.GetEntry(lastApplied_);         // ! 不能使用 const LogEntry& entry = log_.GetEntry(lastApplied_).value(); 
         if(!entryOpt.has_value())
         {
+            spdlog::error("[Node {}] log entry index = {} missing (commitIndex={})", 
+                nodeId_, lastApplied_, commitIndex_);
             //防御：日志突然消失(commitIndex_ > lastIndex())
             break;
         }
-        stateMachine_->Apply(entryOpt.value().command);
+
+        auto& entry = entryOpt.value();
+        spdlog::debug("[Node {}] applying entry index={}, term={}, type={}", 
+            nodeId_, entry.index, entry.term, CommandTypeToString(entry.command.type));
+
+        stateMachine_->Apply(entry.command);
     }
     /* !
     log_.GetEntry(lastApplied_) 返回一个临时 std::optional<LogEntry>
@@ -643,6 +685,20 @@ Role RaftNode::GetRole() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return role_;
+}
+
+const std::string RaftNode::RoleName(Role& role) const
+{
+    switch(role)
+    {
+        case Role::Leader:
+            return "Leader";
+        case Role::Candidate:
+            return "Candidate";
+        case Role::Follower:
+            return "Follower";
+    }
+    return "Unknow";
 }
 
 int64_t RaftNode::GetCurrentTerm() const

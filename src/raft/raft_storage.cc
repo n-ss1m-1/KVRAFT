@@ -1,6 +1,7 @@
 //raft_storage.cc
-#include<iostream>
 #include<fstream>
+
+#include<spdlog/spdlog.h>
 
 #include "raft/raft_storage.h"
 
@@ -33,9 +34,7 @@ bool RaftStorage::AppendLogEntry(const LogEntry& entry)
     // 必须严格按照index顺序追加
     if(entry.index != lastPersistedIndex_+1)
     {
-        std::cerr << "[RaftStorage] AppendLogEntry out of order: entry.index="
-                  << entry.index << " expected=" << (lastPersistedIndex_ + 1)
-                  << std::endl;
+        spdlog::error("[Storage] out-of-order append: index={}, expected={}",entry.index, lastPersistedIndex_+1);
         return false;
     }
 
@@ -46,6 +45,7 @@ bool RaftStorage::AppendLogEntry(const LogEntry& entry)
     // 持久化到磁盘
     if(!logPersister_.AppendToFile(line))
     {
+        spdlog::error("[Storage] AppendLogEntry: AppendToFile failed: index={}", entry.index);
         return false;
     }
 
@@ -54,6 +54,9 @@ bool RaftStorage::AppendLogEntry(const LogEntry& entry)
     indexToOffset_[entry.index] = offset;
     fileSize_ += bytesWritten;
     lastPersistedIndex_ = entry.index;
+
+    spdlog::trace("[Storage] AppendLogEntry: persisted entry index={}, term={}, offset={}",entry.index,entry.term,offset);
+
     return true;
 }
 
@@ -83,13 +86,13 @@ bool RaftStorage::AppendLogEntriesFrom(int64_t startIndex,const std::vector<LogE
         {
             //! 找不到偏移（异常），保守起见不截断，直接追加
             //  这样会导致重复，但加载时 map 去重能兜底
-            std::cerr << "[RaftStorage] cannot find offset for index="
-                      << startIndex << ", skip truncate" << std::endl;
+            spdlog::error("[RaftStorage] AppendLogEntriesFrom: cannot find offset for index={}, skip truncate", startIndex);
         }
         else            //找到了
         {
             // Truncate
             int64_t truncateOffset = it1->second;
+            spdlog::info("[Storage] AppendLogEntriesFrom: truncating log from index={}, offset={}", startIndex, truncateOffset);
             if(!logPersister_.Truncate(truncateOffset))
             {
                 return false;
@@ -140,8 +143,7 @@ std::vector<LogEntry> RaftStorage::LoadLogEntries()
         auto entryOpt = DeserializeLogEntry(line);
         if(!entryOpt.has_value())
         {
-            std::cerr << "[RaftStorage] parse failed at offset "
-                      << lineOffset << ": " << line << std::endl;
+            spdlog::error("[RaftStorage] LoadLogEntries: parse failed at offset {}: {}", lineOffset, line);
             continue;   // 跳过无法解析的行
         }
 
@@ -156,9 +158,8 @@ std::vector<LogEntry> RaftStorage::LoadLogEntries()
     {
         if(index != expectedIndex)
         {
-            std::cerr << "[RaftStorage] log gap: expected index="
-                << expectedIndex << " got=" << index
-                << ", truncating at " << expectedIndex << std::endl;
+            spdlog::error("[RaftStorage] LoadLogEntries: log gap, expected index={} got={}, truncating at {}",
+                expectedIndex, index, expectedIndex);
             break;
         }
         indexToOffset_[index] = pair.first;

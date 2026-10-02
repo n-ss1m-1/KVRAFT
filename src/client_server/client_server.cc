@@ -1,5 +1,7 @@
 //client_server.cc
 
+#include<spdlog/spdlog.h>
+
 #include "client_server/client_server.h"
 #include "kv/kv_store.h"
 #include "raft/raft_node.h"
@@ -52,6 +54,7 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
     auto commandOpt = ParseCommand(msg);
     if(!commandOpt.has_value())
     {
+        spdlog::warn("[ClientServer] invalid command: {}", msg);
         //msg格式错误 无法解析
         reply = "ERROR invalid command";
         return;
@@ -64,6 +67,7 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
         //GET：直接使用kvStore查询+返回结果
         auto value = kvStore_->Get(command.key);
         reply = value.has_value() ? value.value() : "nil";
+        spdlog::debug("[ClientServer] GET {} -> {}", command.key, reply);
     }
     else if(type == Command::Type::PUT || type == Command::Type::DEL)
     {
@@ -71,17 +75,22 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
         if(!raftNode_->IsLeader())      //非Leader：拒绝+客户端重定向
         {
             reply = "NOT_LEADER " + std::to_string(raftNode_->GetLeaderId());
+            spdlog::debug("[ClientServer] {} rejected: not leader, leaderId={}",
+                ((type==Command::Type::PUT)?"PUT":"DEL"), raftNode_->GetLeaderId());
         }
         else        //Leader：需要达成共识再返回结果
         {
             bool ok = raftNode_->Start(command);
             reply = ok ? "OK" : "Timeout";
+            spdlog::info("[ClientServer] {} ({},{})-> {}", 
+                ((type==Command::Type::PUT)?"PUT":"DEL"), command.key, command.value, reply);
         }
     }
     else
     {
         //非法指令类型
         reply = "ERROR unknown command type";
+        spdlog::warn("[ClientServer] Unknow command type: {}", CommandTypeToString(type));
     }
 
 

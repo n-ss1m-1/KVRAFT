@@ -5,19 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)                           #在 build/ 目录生成 `compile_commands.json`，保证能正确找到头文件
 
-# 可执行文件输出到 bin/
+# 可执行文件输出到 bin/  (如果没有该文件夹则创建)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 # ==================== muduo 配置 ====================
-# 方式 A（推荐）：muduo 已安装到系统（make install 后默认在 /usr/local）
-#   直接使用，无需额外配置
-#
-# 方式 B：muduo 源码在外部目录，未安装
-#   执行 cmake 时传 -DMUDUO_ROOT=/path/to/muduo
-#   例如：cmake -DMUDUO_ROOT=$HOME/third_party/muduo ..
-
-set(MUDUO_ROOT "muduo" CACHE PATH "muduo")
-
+set(MUDUO_ROOT "${CMAKE_SOURCE_DIR}/third_party/muduo" CACHE PATH "muduo")
 if(MUDUO_ROOT)
     message(STATUS "Using muduo from: ${MUDUO_ROOT}")
     include_directories(${MUDUO_ROOT})
@@ -25,13 +17,16 @@ if(MUDUO_ROOT)
 else()
     message(STATUS "Using system-installed muduo")
 endif()
-
 # muduo 的库
 set(MUDUO_LIBS
     muduo_net
     muduo_base
     pthread
 )
+
+# ==================== spdlog header-only ====================
+add_subdirectory(third_party/spdlog)
+
 
 # ==================== 头文件搜索路径 ====================
 include_directories(${CMAKE_SOURCE_DIR}/src)
@@ -57,7 +52,9 @@ add_executable(raft-kv
     src/main.cc
     ${CORE_SOURCES}
 )
-target_link_libraries(raft-kv ${MUDUO_LIBS})
+target_link_libraries(raft-kv PRIVATE ${MUDUO_LIBS} spdlog::spdlog_header_only)
+
+
 
 # ==================== 测试程序 ====================
 # 每个测试独立编译，只包含被测模块

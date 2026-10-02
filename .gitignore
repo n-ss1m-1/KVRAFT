@@ -1,13 +1,11 @@
 # CMake编译产物
 build/
 bin/
-CMakeCache.txt
-cmake_install.cmake
-install_manifest.txt
 
 # 日志文件
-data/
-tests/test_data/
+data/*
+logs/*
+tests/test_data/*
 
 # 临时文件、编辑器缓存
 *.o
@@ -24,4 +22,5 @@ back/
 
 
 # 第三方库
-muduo/
+third_party/muduo/
+third_party/spdlog/

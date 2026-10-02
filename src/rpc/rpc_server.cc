@@ -1,6 +1,7 @@
 //rpc_server.cc
 #include<sstream>
-#include<iostream>
+
+#include<spdlog/spdlog.h>
 
 #include "rpc/rpc_server.h"
 #include "rpc/rpc_message.h"
@@ -41,12 +42,15 @@ void RpcServer::HandleMessage(const muduo::net::TcpConnectionPtr& conn,const std
     //读取：消息类型 + reqId
     uint32_t typeNum;
     uint64_t reqId;
-    if(!(iss>>typeNum>>reqId)) return;
-
-    std::cout << "[RpcServer] received type=" << typeNum
-              << " reqId=" << reqId << std::endl;
+    if(!(iss>>typeNum>>reqId)) 
+    {
+        spdlog::warn("[RpcServer] malformed message: {}", msg.substr(0,60));
+        return;
+    }
 
     RpcMessageType type = static_cast<RpcMessageType>(typeNum);
+
+    spdlog::trace("[RpcServer] received type={} reqId={}",(type==RpcMessageType::kRequestVote?"RequestVote":"AppendEntries"),reqId);
 
     //分发消息处理
     switch (type)
@@ -54,7 +58,11 @@ void RpcServer::HandleMessage(const muduo::net::TcpConnectionPtr& conn,const std
         case RpcMessageType::kRequestVote:
         {
             auto argsOpt = DeserializeRequestVoteArgs(iss);
-            if(!argsOpt.has_value()) return;
+            if(!argsOpt.has_value()) 
+            {
+                spdlog::warn("[RpcServer] failed to parse RequestVote");
+                return;
+            }
 
             RequestVoteReply reply;
             node_->HandleRequestVote(argsOpt.value(),reply);
@@ -67,7 +75,11 @@ void RpcServer::HandleMessage(const muduo::net::TcpConnectionPtr& conn,const std
         case RpcMessageType::kAppendEntries:
         {
             auto argsOpt = DeserializeAppendEntriesArgs(iss);
-            if(!argsOpt.has_value()) return;
+            if(!argsOpt.has_value()) 
+            {
+                spdlog::warn("[RpcServer] failed to parse AppendEntries");
+                return;
+            }
 
             AppendEntriesReply reply;
             node_->HandleAppendEntries(argsOpt.value(),reply);
@@ -79,6 +91,7 @@ void RpcServer::HandleMessage(const muduo::net::TcpConnectionPtr& conn,const std
         }
             
     default:
+        spdlog::warn("[RpcServer] unknown message type: {}",static_cast<uint32_t>(type));
         break;
     }
 

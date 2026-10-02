@@ -10,9 +10,13 @@
 #include<thread>
 #include<atomic>
 #include<chrono>
+#include<filesystem>
 
 #include<muduo/net/EventLoop.h>
-
+#include<muduo/base/Logging.h>
+#include<spdlog/spdlog.h>
+#include<spdlog/sinks/stdout_color_sinks.h>
+#include<spdlog/sinks/rotating_file_sink.h>
 
 #include "common/config.h"
 #include "kv/kv_store.h"
@@ -42,6 +46,46 @@ extern "C" void OnSignal(int)
     if(g_loop) g_loop->quit();
 }
 
+// muduo日志输出回调：把muduo的日志字符串交给spdlog打印
+void muduoLogForward(const char* msg, int len)
+{
+    std::string logStr(msg, len);
+    // muduo自带完整日志前缀，直接交给spdlog输出，级别统一用info
+    spdlog::info("[muduo] {}", logStr);
+}
+
+
+void InitSpdlog(int nodeId)
+{
+    //设置和创建日志目录
+    std::filesystem::create_directories("logs");
+    std::string logFile="logs/node"+std::to_string(nodeId)+".log";
+
+    //创建终端sink和文件sink
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_level(spdlog::level::warn);
+    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logFile,10*1024*1024,3);
+    file_sink->set_level(spdlog::level::info);
+
+    //创建logger 绑定上面2个sink
+    std::vector<spdlog::sink_ptr> sinks{console_sink,file_sink};
+    auto logger = std::make_shared<spdlog::logger>("raft",sinks.begin(),sinks.end());
+    
+    //设置为全局Logger，后续spdlog::info(msg)就走这个logger
+    spdlog::set_default_logger(logger);                         //! spdlog 内部全局持有一份 shared_ptr<logger> 的拷贝 -> logger不会释放 -> logger又持有两个sink -> 两个sink也不会释放
+
+    //设置日志格式
+    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [t%t] %v");
+    
+    //设置日志过滤级别
+    logger->set_level(spdlog::level::debug);
+
+    //设置刷盘策略
+    logger->flush_on(spdlog::level::warn);
+    spdlog::flush_every(std::chrono::seconds(1));
+}
+
+
 int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参数
 {
     //参数解析(需要输入当前node的ID)
@@ -66,6 +110,13 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
         return 1;
     }
 
+    //初始化spdlog日志
+    InitSpdlog(nodeId);
+
+    // 设置muduo日志输出回调，接管muduo所有LOG_*宏
+    muduo::Logger::setOutput(muduoLogForward);
+    // muduo的flush回调，一般不用处理
+    muduo::Logger::setFlush([](){ spdlog::shutdown(); });
     
     //初始化loop + 信号
     muduo::net::EventLoop loop;         //!栈上：安全的，loop生命周期与main函数等同
@@ -77,8 +128,9 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
     //初始化KVStore
     std::shared_ptr<KVStore> kvStore = std::make_shared<KVStore>();
 
-    //初始化RaftStorage
+    //初始化RaftStorage + 创建raft日志的文件夹
     std::string dataDir = std::string(config::kDataDirPrefix) + "/node" + std::to_string(nodeId);
+    std::filesystem::create_directories(dataDir);
     std::shared_ptr<RaftStorage> storage = std::make_shared<RaftStorage>(dataDir);
 
     //初始化RpcClient
@@ -126,23 +178,23 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
     });
     
     //打印启动信息
-    std::cout << "============================================\n";
-    std::cout << "[Main] Node " << nodeId << " started\n";
-    std::cout << "[Main] Raft port: " << raftPort << "\n";
-    std::cout << "[Main] Data dir:  " << dataDir << "\n";
-    for (const auto& nodeConfig : cluster) {
+    spdlog::info("============================================");
+    spdlog::info("[Main] Node {} started",nodeId);
+    spdlog::info("[Main] Raft port: {}, ClientServerPort: {}", raftPort, clientServerPort);
+    spdlog::info("[Main] Data dir: {}",dataDir);
+    for (const auto& nodeConfig : cluster) 
+    {
         const auto& p = nodeConfig.peerInfo;
-        std::cout << "[Main]   peer " << p.peerId << " -> "
-                  << p.host << ":" << p.port
-                  << (p.peerId == nodeId ? " (self)" : "") << "\n";
+        if(p.peerId == nodeId)  spdlog::info("[Main]   peer {} -> {}:{}(self)",p.peerId,p.host,p.port);
+        else                    spdlog::info("[Main]   peer {} -> {}:{}",p.peerId,p.host,p.port);
     }
-    std::cout << "============================================\n";
+    spdlog::info("============================================");
 
     //运行事件循环
     loop.loop();
 
     //优雅关闭(! 注意顺序：loop退出循环->停止Tick(停止任务产生)->停止RpcClient(断开连接)->释放组件)
-    std::cout << "\n[Main] Shutting down...\n";
+    spdlog::info("[Main] Shutting down...");
 
     running.store(false);       //! 停止产生新的任务
     timerThread.join(); 
@@ -158,6 +210,8 @@ int main(int argc,char* argv[])         //! char* argv[] 二维数组接收参�
     storage.reset();
     kvStore.reset();
 
+
+    spdlog::shutdown();         //! 手动刷新所有日志，关闭sink，防止日志丢失
     return 0;
 }
 
