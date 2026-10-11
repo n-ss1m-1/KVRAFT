@@ -103,5 +103,42 @@ target_link_libraries(raft-kv PRIVATE ${MUDUO_LIBS} spdlog::spdlog_header_only)
 #     src/common/command.cc
 # )
 
+# KVStore 测试
+add_executable(test-kv-store
+    tests/test_kv_store.cc
+    src/kv/kv_store.cc
+    src/common/command.cc
+)
+target_include_directories(test-kv-store PUBLIC src)
+
+# RaftStorage 测试
+add_executable(test-raft-storage
+    tests/test_raft_storage.cc
+    src/raft/raft_storage.cc
+    src/raft/raft_message.cc
+    src/persist/persister.cc
+    src/common/command.cc
+)
+target_include_directories(test-raft-storage PUBLIC src)
+target_link_libraries(test-raft-storage PRIVATE spdlog::spdlog_header_only)
+
+# Persister 测试
+add_executable(test-persister
+    tests/test_persister.cc
+    src/persist/persister.cc
+)
+target_include_directories(test-persister PUBLIC src)
+target_link_libraries(test-persister PRIVATE spdlog::spdlog_header_only)
+
+# RaftLog 测试
+add_executable(test-raft-log
+    tests/test_raft_log.cc
+    src/raft/raft_log.cc
+    src/raft/raft_message.cc
+    src/common/command.cc
+)
+target_include_directories(test-raft-log PUBLIC src)
+target_link_libraries(test-raft-log PRIVATE spdlog::spdlog_header_only)
+
 # ==================== 全局编译选项 ====================
 add_compile_options(-Wall -Wextra -g)

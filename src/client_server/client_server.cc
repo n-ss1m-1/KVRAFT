@@ -57,6 +57,9 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
         spdlog::warn("[ClientServer] invalid command: {}", msg);
         //msg格式错误 无法解析
         reply = "ERROR invalid command";
+
+        // !▲补充：此时不能直接return，必须回包，否则客户端会超时
+        codec_.send(conn.get(), reply);
         return;
     }
     

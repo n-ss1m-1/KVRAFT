@@ -16,10 +16,12 @@ tests/test_data/*
 .DS_Store
 .vscode/
 *.swp
+__pycache__/
+*.pyc
 
 # 备份文件
 back/
-
+question.md
 
 # 第三方库
 third_party/muduo/
