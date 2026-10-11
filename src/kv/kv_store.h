@@ -21,6 +21,12 @@ public:
     bool ApplyDelete(const std::string& key);
     void Apply(const Command& command);                         //用于重放日志(是否需要重放GET?)
 
+    //序列化数据："key value\nkey value\n..."
+    std::string Serialize() const;                  //!明确语意：不修改成员变量
+
+    //反序列化：清空unordered_map 然后写入数据
+    void Deserialize(const std::string& data);
+
 private:
     std::unordered_map<std::string,std::string> storage_;
     mutable std::shared_mutex mutex_;                                   //const成员函数里修改成员变量->声明为mutable？
