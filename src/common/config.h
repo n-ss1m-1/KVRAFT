@@ -1,4 +1,5 @@
 //config.h
+#pragma once
 
 #include<cstdint>
 #include<string>
@@ -30,6 +31,10 @@ namespace config
     inline constexpr int kElectionTimeoutMinMs = 150;
     inline constexpr int kElectionTimeoutMaxMs = 300;
 
+    //日志条数阈值
+    inline constexpr int64_t kSnapshotThreshold = 20;
+
+    inline constexpr int64_t kNeedSnapshot = -1;   // 使用 conflictIndex特殊值 告诉 Leader 改发 InstallSnapshot
 };
 
 

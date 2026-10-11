@@ -11,6 +11,7 @@
 #include "raft_message.h"
 #include "common/types.h"
 #include "common/command.h"
+#include "common/config.h"
 
 class KVStore;        
 class RaftStorage;    
@@ -43,6 +44,8 @@ public:
     // 处理收到的日志复制/心跳，填 reply
     void HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesReply& reply);
 
+    void HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSnapshotReply& reply);
+
     // ==================== RPC 回复处理 ====================
 
     // 处理投票回复：累加票数，达到大多数则 BecomeLeader
@@ -50,6 +53,8 @@ public:
 
     // 处理日志复制回复：更新 matchIndex/nextIndex，成功则 UpdateCommitIndex
     void HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply& reply);
+
+    void HandleInstallSnapshotReply(int32_t peerId, const InstallSnapshotReply& reply);
 
     // ==================== 定时器 ====================
 
@@ -102,6 +107,7 @@ private:
     bool PersistMeta();         // 持久化 currentTerm_ 和 votedFor_
     bool Recover();             // 启动时：从 storage_ 恢复 meta 和日志(全生命周期仅一次)
 
+    void TakeSnapshot();        // 生成快照
 
     // ==================== RPC 发送（Leader 主动调用）（锁外调用）====================
 
@@ -112,7 +118,7 @@ private:
     // entries 为空时就是心跳
     void SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args);
 
-
+    void SendInstallSnapshot(int32_t peerId,const InstallSnapshotArgs& args);
 
     // ==================== 静态配置 ====================
     int32_t nodeId_;                        // 本节点 ID
@@ -166,4 +172,18 @@ RaftTransport
 - 只有顶层公开方法加锁；
 - 内部辅助方法一律不加锁；
 - 发 RPC 用作用域限制在锁外。
+*/
+
+/*
+TODO： 重启后均发起一条 no-op 日志
+    不持久化commitIndex + Recover只恢复到快照点 
+    -> 状态机停留在快照点
+    -> 重启后成为Leader: 需要一个客户端写请求()  -> 才能调用UpdateCommitIndex()+ApplyCommittedEntries() -> 才能刷新状态机(恢复一致性)
+                         (若客户端直接发起读请求，则只能读到快照点和之前的内容)
+    -> 重启后成为follower: 需要借助Leader心跳 -> HandleAppendEntries() -> ApplyCommittedEntries() -> 才能刷新状态机(恢复一致性)
+
+注：重启后成为Leader是有可能的：
+    选举依靠的是 RaftLog最后一条日志 的 index和term 
+    Recover是借助 RaftStorage(磁盘持久化日志) 恢复RaftLog的，故最后一条日志就对应最后的commitIndex_；若重启期间客户端没有写请求，则该日志为最新的，是有可能成为Leader的
+
 */

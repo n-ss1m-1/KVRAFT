@@ -102,7 +102,7 @@ void RaftNode::SendRequestVote(int32_t peerId,const RequestVoteArgs& args)
     transport_->SendRequestVote(peerId,args,
         [weakSelf,peerId](const RequestVoteReply& reply)
         {
-            if(auto self = weakSelf.lock())                 //! 生命周期：RpcClient>=RaftNode(RaftNode持有shared_ptr_RpcClient,反向则没有)，所以此处需要检查，如果用this可能悬空
+            if(auto self = weakSelf.lock())                 //! 生命周期：RpcClient>=RaftNode(RaftNode持有shared_ptr<RpcClient>(transported_),反向则没有)，所以此处需要检查，如果用this可能悬空
             {
                 self->HandleRequestVoteReply(peerId,reply);
             }
@@ -122,13 +122,29 @@ void RaftNode::SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args)
         });
 }
 
+void RaftNode::SendInstallSnapshot(int32_t peerId,const InstallSnapshotArgs& args)
+{
+    std::weak_ptr<RaftNode> weakSelf = weak_from_this();
+    transport_->SendInstallSnapshot(peerId,args,
+        [weakSelf,peerId](const InstallSnapshotReply& reply)
+        {
+            if(auto self = weakSelf.lock())
+            {
+                self->HandleInstallSnapshotReply(peerId,reply);
+            }
+        });
+}
+
 // 向所有 Follower 发送 AppendEntries：
 // - Follower 已同步：entries 为空（纯心跳）
 // - Follower 落后：entries 带上缺失的日志
 void RaftNode::SendHeartbeat()
 {
-    //先构造所有args 避免多次检查身份
-    std::vector<AppendEntriesArgs> allArgs(totalNodes_);
+    std::vector<bool> needsSnapshot(totalNodes_, false);    //记录需要发送快照的peer
+    std::vector<AppendEntriesArgs> allAppendArgs(totalNodes_);    //先构造所有args 锁外统一发送
+
+    bool anyNeedSnapshot = false;
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -139,22 +155,63 @@ void RaftNode::SendHeartbeat()
         {
             if(peerId == nodeId_) continue;
 
-            AppendEntriesArgs& args = allArgs[peerId];
+            //判断是否需要发送快照
+            if(nextIndex_[peerId] <= log_.SnapshotIndex())
+            {
+                needsSnapshot[peerId] = true;
+                anyNeedSnapshot = true;
+                continue;
+            }
+
+            AppendEntriesArgs& args = allAppendArgs[peerId];
             //心跳的作用：1. 让follower提交达成共识的日志  2. 让follower对比Leader的最后一条日志标签，进行一致性检查
             args.term = currentTerm_;
             args.leaderId = nodeId_;
-            args.prevLogIndex = nextIndex_[peerId] - 1;     //! 心跳应该针对不同peer，使用不同的一致性检查(而非均用leader的lastLog) -> 更灵活的日志复制
-            args.prevLogTerm = (args.prevLogIndex == 0)     //! prevLogIndex == 0时，GetEntry()返回nullopt
-                               ? 0
-                               : log_.GetEntry(args.prevLogIndex).value().term;     
+            args.prevLogIndex = nextIndex_[peerId] - 1;             //! 心跳应该针对不同peer，使用不同的一致性检查(而非均用leader的lastLog) -> 更灵活的日志复制
+            args.prevLogTerm = log_.GetTerm(args.prevLogIndex);     //!▲ GetTerm处理: 相应日志在快照中 ||  prevLogIndex=0 的情况    
 
             args.entries = log_.GetEntries(args.prevLogIndex+1, log_.LastIndex()+1);     //! GetEntries返回临时对象(右值) move()没有效果   //! 左闭右开区间
             args.leaderCommit = commitIndex_;
 
-            spdlog::debug("[Node(Leader) {} -> peer {}] SendHeartbeat: term={}, prevLog={}  entries.size={} leaderCommit={}",
-                nodeId_, peerId, currentTerm_, args.prevLogIndex, args.prevLogTerm, args.entries.size(), args.leaderCommit);
+            spdlog::info("[Node {}] SEND: peer={}, prev={}, entries.size={}, myLastIndex={}, mySnapshot={}",
+                nodeId_, peerId, args.prevLogIndex, args.entries.size(),log_.LastIndex(), log_.SnapshotIndex());
+
         }
     }
+
+    //如果由peer需要快照，则加载一次
+    InstallSnapshotArgs snapArgs;
+    bool snapshotReady = false;
+    if(anyNeedSnapshot)
+    {
+        /* 
+         ! 锁外加载快照：tmp+rename保证原子性，可大大减小锁的粒度
+         
+         ! 问：为什么保存快照(TakeSnapshot)需要锁呢?
+            SaveSnapshot()本身是原子性的(tmp+rename)
+            但是TakeSnapshot需要访问了许多临界区的数据(RaftLog::snapshotIndex_  RaftStorage::indexToOffset_ 等等)
+            如果把SaveSnapshot单独隔出来也会出现中间状态变化的问题，故 放在一个锁内简化处理
+        */
+        auto snap = storage_->LoadSnapshot();       
+        if(snap.has_value())
+        {
+            std::lock_guard<std::mutex>lock(mutex_);
+            if(role_ != Role::Leader) return;           //再次加锁需要检查身份
+
+            snapArgs.term = currentTerm_;
+            snapArgs.leaderId = nodeId_;
+            snapArgs.lastIncludedIndex = snap->lastIncludedIndex;
+            snapArgs.lastIncludedTerm = snap->lastIncludedTerm;
+            snapArgs.data = std::move(snap->data);
+            snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());
+            snapshotReady = true;
+        }
+        else
+        {
+            spdlog::error("[Node {}] no snapshot but peers need it", nodeId_);
+        }
+    }
+
 
     //再一起发送RPC消息
     for(int32_t peerId = 0; peerId<totalNodes_; peerId++) 
@@ -162,7 +219,12 @@ void RaftNode::SendHeartbeat()
         if(peerId == nodeId_) continue;
         
         //RPC发送消息：锁外
-        SendAppendEntries(peerId,allArgs[peerId]);
+        if(needsSnapshot[peerId])
+        {
+            // 需要快照+args准备好 -> 发送快照
+            if(snapshotReady) SendInstallSnapshot(peerId, snapArgs);
+        }   // 不需要快照：发送心跳/追加日志
+        else SendAppendEntries(peerId,allAppendArgs[peerId]);
     }
 }
 
@@ -253,6 +315,7 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
         spdlog::debug("[Node {}] consistency FAIL: prevLog=({},{}), my.lastLog=({},{}), conflictIndex={}",
             nodeId_, args.prevLogTerm,args.prevLogIndex, log_.LastTerm(),log_.LastIndex(), check.conflictIndex);
 
+        //TODO：-1  发送快照
         reply.conflictIndex = check.conflictIndex;
         return;
     }
@@ -263,7 +326,7 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
     {
         spdlog::error("[Node {}] log.AppendFrom FAILED: startIndex={}, entries.size={}",
             nodeId_, args.prevLogIndex+1,args.entries.size());
-        //! 填入非法值表示严重错误 而非日志冲突
+        //! 填入非法值表示严重错误 而非日志冲突(此处说明需要添加的日志在快照中，快照需要被覆盖，此时需要Leader发送快照)
         reply.conflictIndex = -1;
         return;
     }
@@ -293,9 +356,67 @@ void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesR
     //7. 应用到状态机
     ApplyCommittedEntries();
 
+    spdlog::info("[Node {}] REPLY CHECK: lastIndex={}, snapshotIndex={}, Size={}, prevLogIndex={}, entries.size={}",
+        nodeId_, log_.LastIndex(), log_.SnapshotIndex(), log_.Size(),args.prevLogIndex, args.entries.size());
+
     //8. 确认reply->success
     reply.success = true;
     reply.matchIndex = log_.LastIndex();
+}
+
+void RaftNode::HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSnapshotReply& reply)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    reply.success = false;
+    reply.term = currentTerm_;
+   
+    // 1. 检查term
+    if(currentTerm_ > args.term)
+    {
+        spdlog::debug("[Node {}] reject InstallSnapshot: stale term {} < {} = my.term",
+            nodeId_, args.term, currentTerm_);
+        return;                     //过期的Leader
+    }
+
+    // 2. 重置选举超时
+    electionResetTime_ = std::chrono::steady_clock::now();
+
+    // 3. 记录LeaderId
+    leaderId_ = args.leaderId;
+
+    // 4.1  快照比本地旧 → 回报本地快照点，成功返回，不动自己
+    if (args.lastIncludedIndex <= log_.SnapshotIndex()) {
+        spdlog::info("[Node {}] ignore older snapshot: leader={}, mine={}",
+                     nodeId_, args.lastIncludedIndex, log_.SnapshotIndex());
+        reply.lastIncludedIndex = log_.SnapshotIndex();
+        reply.success = true;
+        return;
+    }
+
+    // 5. 先将快照落盘(持久化)，失败则不动状态机/内存/日志，回报失败让Leader下轮重试
+    if(!storage_->SaveSnapshot(args.lastIncludedIndex,args.lastIncludedTerm,args.data))
+    {
+        spdlog::error("[Node {}] HandleInstallSnapshot: SaveSnapshot failed at index={}", 
+            nodeId_, args.lastIncludedIndex);
+        return;
+    }
+
+    // 4.2 Leader发送的快照更加新 + 快照成功落盘 -> 再采纳 
+    spdlog::info("[Node {}] installing snapshot: LastIncludedIndex={}, LastIncludedTerm={}, size={}",
+        nodeId_, args.lastIncludedIndex, args.lastIncludedTerm, args.data.size());
+    
+    stateMachine_->Deserialize(args.data);
+    log_.SetSnapshotIndexAndTerm(args.lastIncludedIndex,args.lastIncludedTerm);
+    commitIndex_ = lastApplied_ = args.lastIncludedIndex;
+
+    if(!storage_->TruncateLogUpTo(args.lastIncludedIndex))
+    {
+        spdlog::warn("[Node {}] HandleInstallSnapshot: TruncateLogUpTo({}) failed",
+            nodeId_, args.lastIncludedIndex);
+    }
+
+    reply.success = true;
 }
 
 void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& reply)
@@ -354,12 +475,9 @@ void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& re
 
 //!注意实现逻辑
 void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply& reply)
-{
-    //bool needRetry = false;
-    //AppendEntriesArgs args;
-    
+{ 
     bool needNotify = false;
-
+    bool needSnapshot = false;
     {   
         //!读取共享数据需要加锁
         std::lock_guard<std::mutex> lock(mutex_);
@@ -369,7 +487,7 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         {
             spdlog::warn("[Node {}(Leader)] reply from {} higher term {} > {} = my.term, stepping down",
                 nodeId_, peerId, reply.term, currentTerm_);
-            BecomeFollower(reply.term);      //内部会更新currentTerm_  所以要后赋值term
+            BecomeFollower(reply.term);      //内部会更新currentTerm_ 
         }
 
         if(currentTerm_ > reply.term) return;   //! 过期回复
@@ -377,15 +495,22 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         //2. !再次检查角色
         if(!(role_==Role::Leader)) return;
 
-        //spdlog::info("[Node {}] HandleReply from peer {} success={} matchIndex={} conflictIndex={} → nextIndex={}",nodeId_,peerId,reply.success,reply.matchIndex,reply.conflictIndex,nextIndex_[peerId]);
+        spdlog::info("[Node {}] HandleAppendEntriesReply from peer {} success={} matchIndex={} conflictIndex={} → nextIndex={}",
+            nodeId_,peerId,reply.success,reply.matchIndex,reply.conflictIndex,nextIndex_[peerId]);
 
         //3. success分支
         // 规定nodeId_即为nextIndex_和matchIndex_的对应下标
         if(reply.success)
         {
             int64_t oldMatch = matchIndex_[peerId];
-            matchIndex_[peerId] = reply.matchIndex;
-            nextIndex_[peerId] = matchIndex_[peerId] + 1;
+            
+            //▲! RPC可能乱序到达：不允许旧的回复(matchIndex更小的回复)更新此处，不能把进度往回拉
+            if(reply.matchIndex > matchIndex_[peerId])
+            {
+                matchIndex_[peerId] = reply.matchIndex;
+                nextIndex_[peerId] = matchIndex_[peerId] + 1;
+            }
+            
 
             spdlog::debug("[Node {}(leader)] <- peer {} ACK Append: matchIndex {} -> {}, nextIndex={}",
                 nodeId_, peerId, oldMatch, matchIndex_[peerId], nextIndex_[peerId]);
@@ -397,37 +522,114 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
                 needNotify = true;
             }
         }
+        else if(reply.conflictIndex == config::kNeedSnapshot)
+        {
+            needSnapshot = true;
+        }
         else
         {
             int64_t oldNext = nextIndex_[peerId];
-            nextIndex_[peerId] = reply.conflictIndex;
+            int64_t minAllowed = log_.SnapshotIndex() + 1;      //bug !▲易错 conflictIndex 不能小于 SnapshotIndex() + 1    避免回退到快照前(会导致死循环)
+            if(reply.conflictIndex >= minAllowed)
+            {
+                nextIndex_[peerId] = reply.conflictIndex;
+            }
+            else
+            {
+                nextIndex_[peerId] = minAllowed;                //!▲ nextIndex_回退的下限：快照点 + 1 
+                needSnapshot = true;                        //Follower 要的位置比我的快照还旧，必须发快照
+            }
+            
             spdlog::debug("[Node {}(Leader)] <- peer {} REJECT Append, nextIndex: {} -> {} (conflictIndex={})", 
                 nodeId_, peerId, oldNext, nextIndex_[peerId], reply.conflictIndex);
-            //needRetry = true;
-
-            //args.term = currentTerm_;
-            //args.leaderId = nodeId_;
-            //args.prevLogIndex = nextIndex_[peerId] - 1;
-            //args.prevLogTerm = (args.prevLogIndex == 0)                 //! prevLogIndex = 0 时，GetEntry()返回nullopt
-            //                   ? 0 
-            //                   : log_.GetEntry(args.prevLogIndex).value().term;
-            //args.entries = log_.GetEntries(reply.conflictIndex, log_.LastIndex()+1);        //! 左闭右开
-            //args.leaderCommit = commitIndex_;
         }
     }
-
-    //! RPC发送消息: 锁外 
-    //if(needRetry) 
-    //{
-        //▲! 最好不做立即重新发送：让Tick()的心跳自然触发下一次发送
-    //    SendAppendEntries(peerId,args);
-    //}
+    //▲! 最好不做立即重新发送SendAppendEntries：让Tick()的心跳自然触发下一次发送
 
     // 必须在锁外notify，否则唤醒后仍然抢不到锁
     if(needNotify)
     {
         cond_.notify_all();
     }
+    // 需要复制的日志在快照内：直接发送快照
+    if(needSnapshot)
+    {
+        //如果由peer需要快照，则加载一次
+        InstallSnapshotArgs snapArgs;
+        bool snapshotReady = false;
+        auto snap = storage_->LoadSnapshot();           //! tmp+rename 保证原子性
+        if(snap.has_value())
+        {
+            std::lock_guard<std::mutex>lock(mutex_);
+            if(role_ != Role::Leader) return;           //再次加锁需要检查身份
+
+            snapArgs.term = currentTerm_;
+            snapArgs.leaderId = nodeId_;
+            snapArgs.lastIncludedIndex = snap->lastIncludedIndex;
+            snapArgs.lastIncludedTerm = snap->lastIncludedTerm;
+            snapArgs.data = std::move(snap->data);
+            snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());
+            snapshotReady = true;
+        }
+        else
+        {
+            spdlog::error("[Node {}] no snapshot but peers need it", nodeId_);
+        }
+        SendInstallSnapshot(peerId,snapArgs);
+    }
+}
+
+void RaftNode::HandleInstallSnapshotReply(int32_t peerId, const InstallSnapshotReply& reply)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 1. 检查term
+    if(currentTerm_ < reply.term)
+    {
+        spdlog::warn("[Node {}(Leader)] HandleInstallSnapshotReply from peer {} higher term {} > {} = my.term, stepping down",
+                nodeId_, peerId, reply.term, currentTerm_);
+        BecomeFollower(reply.term);         //内部会更新currentTerm_ 
+    }
+
+    if(currentTerm_ > reply.term) return;       //过期的回复
+
+    // 2. 检查身份
+    if(!(role_==Role::Leader)) return;
+
+    spdlog::info("[Node {}(Leader)] HandleInstallSnapshotReply from peer {} success={}",
+            nodeId_,peerId,reply.success);
+
+    // 3. 处理回复的结果
+    if(reply.success)
+    {
+        int64_t installed = reply.lastIncludedIndex;
+
+        //▲! 只在快照比已知的 matchIndex 更新时才更新
+        if(installed > matchIndex_[peerId])
+        {
+            matchIndex_[peerId] = installed;
+            nextIndex_[peerId] = installed + 1;
+        }
+        // 否则说明这个快照回复是过期的（Follower 已经更靠前了），忽略
+        
+        spdlog::info("[Node {}(Leader)] HandleInstallSnapshotReply: peer {} installed snapshot, nextIndex={}, matchIndex={}",
+            nodeId_, peerId, nextIndex_[peerId], matchIndex_[peerId]);
+    }
+    else
+    {
+        spdlog::warn("[Node {}(Leader)] HandleInstallSnapshotReply: peer {} rejected snapshot",nodeId_, peerId);
+    }
+
+    /* !▲
+    此处不调用UpdateCommitIndex(): 
+      ApplyCommittedEntries() -> 会检查是否需要takesnapshot() ->
+      -> commited && applied 的日志才会加入快照
+      -> snapshotIndex_ <= commitIndex_（不变式）
+      若在此处调用 UpdateCommitIndex() 不会让大多数 matchIndex 前进到超过 commitIndex_
+      commitIndex_ 只会由后续的 AppendEntries(心跳) 推进
+
+      不过，也可以为了 对称+防御未来改动 加上这块调用，现在暂时不加(TODO)
+    */
 }
 
 //超时：StartElection() 或 SendHeartbeat()
@@ -595,24 +797,32 @@ void RaftNode::BecomeLeader()
 }
 
 
-//简化版：仅检查Leader的lastIndex()
+/*
+简化版：仅检查Leader的lastIndex()
+优化: 追加速度 > 复制速度 时，仅判断 LastIndex() 会导致 commitIndex_ 迟迟无法更新
+->通用版: 从LastTerm()向前找到当前的最大commitIndex
+*/
 void RaftNode::UpdateCommitIndex()
 {
-    //▲! Leader 只能提交属于自己任期的日志：必须等到"自己任期的日志"被大多数确认后，才能顺带提交之前的日志。
-    if(currentTerm_ != log_.LastTerm()) return;
+    if(commitIndex_ >= log_.LastIndex()) return;        //无新日志
 
-    int64_t n = log_.LastIndex();
-    if(n == 0) return;              //防御：空日志(不过一般不出现)
-    int count = 0;
-    for(int64_t matchIndex : matchIndex_)
+    
+    for(int64_t n=log_.LastIndex(); n>commitIndex_; n--)
     {
-        if(matchIndex >= n) count++;
-    }
+        if(currentTerm_ != log_.GetTerm(n)) continue;   //▲! Leader 只能提交属于自己任期的日志：必须等到"自己任期的日志"被大多数确认后，才能顺带提交之前的日志。
 
-    if(count > totalNodes_/2)
-    {
-        commitIndex_ = n;
-        ApplyCommittedEntries();
+        int count = 0;
+        for(int64_t mi : matchIndex_)
+        {
+            if(mi >= n) count++;
+        }
+
+        if(count > totalNodes_/2)
+        {
+            commitIndex_ = n;
+            ApplyCommittedEntries();
+            return;                         // 找到当前最大commitIndex_就退出
+        }
     }
 }
 
@@ -620,12 +830,12 @@ void RaftNode::ApplyCommittedEntries()
 {
     while(lastApplied_ < commitIndex_)
     {
-        lastApplied_++;
-        const auto entryOpt = log_.GetEntry(lastApplied_);         // ! 不能使用 const LogEntry& entry = log_.GetEntry(lastApplied_).value(); 
+        int64_t applyingIndex = lastApplied_ + 1;
+        const auto entryOpt = log_.GetEntry(applyingIndex);         // ! 不能使用 const LogEntry& entry = log_.GetEntry(applyingIndex).value(); 
         if(!entryOpt.has_value())
         {
             spdlog::error("[Node {}] log entry index = {} missing (commitIndex={})", 
-                nodeId_, lastApplied_, commitIndex_);
+                nodeId_, applyingIndex, commitIndex_);
             //防御：日志突然消失(commitIndex_ > lastIndex())
             break;
         }
@@ -635,7 +845,15 @@ void RaftNode::ApplyCommittedEntries()
             nodeId_, entry.index, entry.term, CommandTypeToString(entry.command.type));
 
         stateMachine_->Apply(entry.command);
+        lastApplied_++;                         //! 真正应用后再+1
     }
+
+    // 每次应用完，检查是否需要快照
+    if(log_.Size() > config::kSnapshotThreshold)
+    {
+        TakeSnapshot();
+    }
+
     /* !
     log_.GetEntry(lastApplied_) 返回一个临时 std::optional<LogEntry>
     .value() 返回这个临时对象内部存储的 LogEntry&
@@ -655,18 +873,101 @@ bool RaftNode::PersistMeta()
 //启动时调用：全生命周期仅一次
 bool RaftNode::Recover()
 {
-    //从磁盘读取元状态和日志
+    // 1. 加载meta
     auto [currentTerm,votedFor] = storage_->LoadMeta();
-    auto entries = storage_->LoadLogEntries();
 
     //将元状态和日志存入内存
     currentTerm_=currentTerm;
     votedFor_=votedFor;
 
-    //避免重复恢复日志 防御性编程 去掉也可以
-    //log_ = RaftLog();
+    // 2. 加载快照
+    int64_t snapshotIndex = 0;
+    int64_t snapshotTerm = 0;
+    auto snapshot = storage_->LoadSnapshot();
+    if(snapshot.has_value())
+    {
+        // 2.1 有快照
+        stateMachine_->Deserialize(snapshot->data);         //kv状态机恢复最后快照的样子?
 
-    return log_.AppendFrom(1,entries);         //日志初始index 从1开始
+        log_.SetSnapshotIndexAndTerm(snapshot->lastIncludedIndex,snapshot->lastIncludedTerm);
+
+        snapshotIndex = snapshot->lastIncludedIndex;
+        snapshotTerm = snapshot->lastIncludedTerm;
+
+        spdlog::info("[Node {}] recovered from snapshot,until index={}, term={}",
+            nodeId_, snapshotIndex, snapshotTerm);
+    }
+    else
+    {
+        // 2.2 无快照(不是错误)
+        spdlog::info("[Node {}] no snapshot, cold start",nodeId_);
+    }
+
+    // 快照覆盖的一定是已应用的，已应用的一定是已提交的
+    lastApplied_ = commitIndex_ = snapshotIndex;            //!▲ 重启后，状态机会暂时回退，但是作为follower接收leader心跳后 -> 调用HandleAppendEntries() -> ApplyCommitedEntries() -> 逐渐恢复一致性
+
+    // 3. 加载日志
+    auto entries = storage_->LoadLogEntries(snapshotIndex);
+
+    // 4. 追加到log_
+    for(const auto& e : entries)
+    {
+        if(e.index <= log_.LastIndex()) continue;       // 该日志存在于快照中
+        log_.AppendEntry(e);
+    }
+
+    spdlog::info("[Node {}] Recover done: term={}, snapshotIndex={}, lastLogIndex={}, loaded {} entries",
+        nodeId_, currentTerm_, snapshotIndex, log_.LastIndex(),entries.size());
+
+    return true;
+}
+
+void RaftNode::TakeSnapshot()
+{
+    // 1. 检查是否有新进展
+    if(lastApplied_ == 0 || lastApplied_ <= log_.SnapshotIndex()) return;
+
+    // 防御：lastApplied必须在log_的有效范围里
+    if (lastApplied_ > log_.LastIndex()) 
+    {
+        spdlog::warn("[Node {}] TakeSnapshot: lastApplied_={} > LastIndex={}, skip",
+                     nodeId_, lastApplied_, log_.LastIndex());
+        return;
+    }
+
+    // 2. 获取快照点(index,term)
+    int64_t snapshotIndex = lastApplied_;
+    int64_t snapshotTerm = log_.GetTerm(snapshotIndex);
+    if (snapshotTerm == 0) 
+    {
+        spdlog::error("[Node {}] TakeSnapshot: cannot get term for index={}", nodeId_, snapshotIndex);
+        return;
+    }
+
+    spdlog::info("[Node {}] TakeSnapshot: index={}, term={}", nodeId_, snapshotIndex, snapshotTerm);
+
+    // 3. 序列化状态机data
+    const std::string data = stateMachine_->Serialize();
+
+    // 4. 保存快照文件
+    if(!storage_->SaveSnapshot(snapshotIndex,snapshotTerm,data))
+    {
+        spdlog::error("[Node {}] TakeSnapshot: SaveSnapshot failed", nodeId_);
+        return;                                                         //! 只有快照真正落盘后，才更新内存状态。 否则内存和磁盘不一致。
+    }
+
+    // 5. 更新RaftLog的逻辑起点
+    log_.SetSnapshotIndexAndTerm(snapshotIndex,snapshotTerm);
+
+    // 6. 物理截断日志文件
+    if(!storage_->TruncateLogUpTo(snapshotIndex))
+    {
+        // 不致命，等待下次重试
+        spdlog::warn("[Node {}] TakeSnapshot: TruncateLogUpTo failed, will retry", nodeId_);
+    }
+
+    spdlog::info("[Node {}] TakeSnapshot: snapshot taken at index={}, term={}, log.size={}",
+            nodeId_, snapshotIndex, snapshotTerm, log_.Size());
 }
 
 bool RaftNode::IsLeader() const
