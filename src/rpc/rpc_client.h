@@ -19,9 +19,9 @@ public:
     RpcClient(muduo::net::EventLoop* loop,const std::vector<PeerInfo>& peers);
     ~RpcClient();
     void Stop();
-    void SendRequestVote(int32_t peerId,const RequestVoteArgs& args,RequestVoteCallback cb) override;            //const &或者 值传递 才能接收lambda表达式
-    void SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args,AppendEntriesCallback cb) override;      //值传递：使用move零拷贝
-
+    void SendRequestVote(int32_t peerId,const RequestVoteArgs& args,RequestVoteCallback cb) override;               //const &或者 值传递 才能接收lambda表达式
+    void SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args,AppendEntriesCallback cb) override;         //值传递：使用move零拷贝
+    void SendInstallSnapshot(int32_t peerId, const InstallSnapshotArgs& args, InstallSnapshotCallback cb) override;
 
 private:
     struct peerConn
@@ -46,6 +46,11 @@ private:
         int32_t peerId;
         AppendEntriesCallback cb;
     };
+    struct PendingInstallSnapshot
+    {
+        int32_t peerId;
+        InstallSnapshotCallback cb;
+    };
     
     void CheckPeerHealth(int32_t peerId, RpcClient::peerConn* pc);      // 调用前必须已持锁
 
@@ -61,6 +66,7 @@ private:
     uint64_t nextReqId_ = 0;
     std::unordered_map<uint64_t,PendingVote> pendingVoteCallbacks_;
     std::unordered_map<uint64_t,PendingAppend> pendingAppendCallbacks_;
+    std::unordered_map<uint64_t,PendingInstallSnapshot> pendingInstallSnapshotCallbacks_;
     bool stopping_ = false;
     std::mutex mutex_;
 };

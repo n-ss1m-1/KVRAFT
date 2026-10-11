@@ -57,6 +57,25 @@ struct AppendEntriesReply
 };
 
 
+//快照
+struct InstallSnapshotArgs
+{
+    int64_t term = 0;
+    int32_t leaderId = 0;
+    int64_t lastIncludedIndex = 0;
+    int64_t lastIncludedTerm = 0;
+    int64_t dataLen = 0;
+    std::string data;
+};
+
+struct InstallSnapshotReply
+{
+    int64_t term = 0;
+    int64_t lastIncludedIndex = 0;      // follower 实际拥有的快照下标
+    bool success = false;
+};
+
+
 //LogEntry序列化和反序列化
 std::string SerializeLogEntry(const LogEntry& entry);
 

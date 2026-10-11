@@ -154,6 +154,41 @@ void RpcClient::SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args,A
     
 }
 
+void RpcClient::SendInstallSnapshot(int32_t peerId, const InstallSnapshotArgs& args, InstallSnapshotCallback cb)
+{
+    uint64_t reqId;
+    muduo::net::TcpConnectionPtr conn;
+    LengthHeaderCodec* codec;
+    bool ok = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = peers_.find(peerId);
+        if(it != peers_.end())
+        {
+            CheckPeerHealth(peerId,it->second.get());
+            if(it->second->conn)
+            {
+                reqId = nextReqId_++;
+                conn = it->second->conn;
+                codec = it->second->codec.get();
+                pendingInstallSnapshotCallbacks_[reqId] = {peerId,std::move(cb)};
+                it->second->lastSendTime = std::chrono::steady_clock::now();
+                ok = true;
+            }
+        }
+    }
+
+    if(!ok)
+    {
+        cb(InstallSnapshotReply());
+        return;
+    }
+
+    std::string msg = SerializeInstallSnapshotArgs(reqId,args);
+    codec->send(conn.get(),msg);
+}
+
 // 调用前必须已持锁
 void RpcClient::CheckPeerHealth(int32_t peerId, RpcClient::peerConn* pc)
 {
@@ -304,6 +339,33 @@ void RpcClient::handleReply(int32_t peerId, const std::string& msg)
                 }
                 cb=std::move(it->second.cb);
                 pendingAppendCallbacks_.erase(it);
+            }
+            cb(reply);
+
+            break;
+        }
+        case RpcMessageType::kInstallSnapshotReply:
+        {
+            auto replyOpt = DeserializeInstallSnapshotReply(iss);
+            if(!replyOpt.has_value())
+            {
+                spdlog::warn("[RpcClient] peer {}, reqId={}, deserialize InstallSnapshotReply failed",peerId,reqId);
+                return;
+            }
+
+            auto& reply = replyOpt.value();
+            spdlog::debug("[RpcClient] InstallSnapshotReply peer={}, reqId={}, term={}, success={}",peerId,reqId,reply.term,reply.success);
+            InstallSnapshotCallback cb;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto it = pendingInstallSnapshotCallbacks_.find(reqId);
+                if(it==pendingInstallSnapshotCallbacks_.end())
+                {
+                    spdlog::warn("[RpcClient] unexpected reply from peer {} reqId={}",peerId, reqId);
+                    return;
+                }
+                cb=std::move(it->second.cb);
+                pendingInstallSnapshotCallbacks_.erase(it);
             }
             cb(reply);
 

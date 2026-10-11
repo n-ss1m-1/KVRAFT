@@ -7,6 +7,17 @@
 #include "rpc/rpc_message.h"
 #include "raft/raft_node.h"
 
+static const char* MessageTypeName(RpcMessageType t) 
+{
+    switch (t) {
+        case RpcMessageType::kRequestVote: return "RequestVote";
+        case RpcMessageType::kAppendEntries: return "AppendEntries";
+        case RpcMessageType::kInstallSnapshot: return "InstallSnapshot";
+        default: return "Unknow";
+    }
+    return "Unknow";
+}
+
 
 RpcServer::RpcServer(muduo::net::EventLoop* loop,uint16_t port,RaftNode* node):
     server_(loop,muduo::net::InetAddress(port),"RpcServer"),
@@ -50,7 +61,7 @@ void RpcServer::HandleMessage(const muduo::net::TcpConnectionPtr& conn,const std
 
     RpcMessageType type = static_cast<RpcMessageType>(typeNum);
 
-    spdlog::trace("[RpcServer] received type={} reqId={}",(type==RpcMessageType::kRequestVote?"RequestVote":"AppendEntries"),reqId);
+    spdlog::trace("[RpcServer] received type={} reqId={}",MessageTypeName(type),reqId);
 
     //分发消息处理
     switch (type)
@@ -86,6 +97,23 @@ void RpcServer::HandleMessage(const muduo::net::TcpConnectionPtr& conn,const std
 
             std::string replyStr = SerializeAppendEntriesReply(reqId,reply);
             codec_.send(conn.get(),replyStr);                                        //传递裸指针  !!!无法选举成功的原因：本应该回复replyStr，写错成msg了
+
+            break;
+        }
+        case RpcMessageType::kInstallSnapshot:
+        {
+            auto argsOpt = DeserializeInstallSnapshotArgs(iss);
+            if(!argsOpt.has_value()) 
+            {
+                spdlog::warn("[RpcServer] failed to parse InstallSnapshot");
+                return;
+            }
+
+            InstallSnapshotReply reply;
+            node_->HandleInstallSnapshot(argsOpt.value(),reply);
+
+            std::string replyStr = SerializeInstallSnapshotReply(reqId,reply);
+            codec_.send(conn.get(),replyStr);                                        
 
             break;
         }

@@ -62,6 +62,33 @@ std::string SerializeAppendEntriesReply(uint64_t reqId,const AppendEntriesReply&
     return oss.str();
 }
 
+std::string SerializeInstallSnapshotArgs(uint64_t reqId,const InstallSnapshotArgs& args)
+{
+    std::ostringstream oss;
+    oss <<static_cast<uint32_t>(RpcMessageType::kInstallSnapshot)<<" "
+        <<reqId<<" "
+        <<args.term<<" "
+        <<args.leaderId<<" "
+        <<args.lastIncludedIndex<<" "
+        <<args.lastIncludedTerm<<" "
+        <<static_cast<int64_t>(args.data.size())<<"\n"     // 不再信任传入的args.dataLen           // '\n'分隔 header和data 
+        <<args.data;
+
+    return oss.str();
+}
+
+std::string SerializeInstallSnapshotReply(uint64_t reqId,const InstallSnapshotReply& reply)
+{
+    std::ostringstream oss;
+    oss <<static_cast<uint32_t>(RpcMessageType::kInstallSnapshotReply)<<" "         // bug! 类型错误导致rpc_client一直无法处理该消息
+        <<reqId<<" "
+        <<reply.term<<" "
+        <<reply.lastIncludedIndex<<" "
+        <<reply.success;
+
+    return oss.str();
+}
+
 
 std::optional<RequestVoteArgs> DeserializeRequestVoteArgs(std::istringstream& iss)
 {
@@ -103,5 +130,31 @@ std::optional<AppendEntriesReply> DeserializeAppendEntriesReply(std::istringstre
     AppendEntriesReply reply;
     if(!(iss>>reply.term>>reply.success>>reply.matchIndex>>reply.conflictIndex)) return std::nullopt;
     
+    return reply;
+}
+
+std::optional<InstallSnapshotArgs> DeserializeInstallSnapshotArgs(std::istringstream& iss)
+{
+    InstallSnapshotArgs args;
+    if(!(iss>>args.term>>args.leaderId>>args.lastIncludedIndex>>args.lastIncludedTerm>>args.dataLen)) return std::nullopt;
+    iss >> std::ws;                         //! 跳过所有空白字符（含换行）    
+    
+    
+    //防御：设置数据上限(1GB)  &&  dataLen<=0时也不需要快照复制
+    constexpr int64_t kMaxSnapshotSize = 1LL << 30;
+    if(args.dataLen <= 0 || args.dataLen > kMaxSnapshotSize) return std::nullopt;
+
+    //! 不能直接read：args.data 是空字符串，data() 返回的缓冲区大小是 0 -> read 会写越界
+    args.data.resize(args.dataLen);
+    if(!iss.read(args.data.data(), args.dataLen)) return std::nullopt;
+
+    return args;
+}
+
+std::optional<InstallSnapshotReply> DeserializeInstallSnapshotReply(std::istringstream& iss)
+{
+    InstallSnapshotReply reply;
+    if(!(iss>>reply.term>>reply.lastIncludedIndex>>reply.success)) return std::nullopt;
+
     return reply;
 }

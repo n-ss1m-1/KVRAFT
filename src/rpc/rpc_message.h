@@ -13,6 +13,8 @@ enum class RpcMessageType : uint32_t        //!? 显式写值——避免将来�
     kRequestVoteReply       = 2,
     kAppendEntries          = 3,
     kAppendEntriesReply     = 4,
+    kInstallSnapshot        = 5,
+    kInstallSnapshotReply   = 6,
     kUnknow                 = 0
 };
 //解析消息类型时：使用static_cast进行类型转换 + default处理未知消息类型
@@ -21,11 +23,20 @@ enum class RpcMessageType : uint32_t        //!? 显式写值——避免将来�
 //序列化：<消息类型> <reqId> <args/reply>
 std::string SerializeRequestVoteArgs(uint64_t reqId,const RequestVoteArgs& args);
 std::string SerializeRequestVoteReply(uint64_t reqId,const RequestVoteReply& reply);
+
 std::string SerializeAppendEntriesArgs(uint64_t reqId,const AppendEntriesArgs& args);
 std::string SerializeAppendEntriesReply(uint64_t reqId,const AppendEntriesReply& reply);
+
+std::string SerializeInstallSnapshotArgs(uint64_t reqId,const InstallSnapshotArgs& args);
+std::string SerializeInstallSnapshotReply(uint64_t reqId,const InstallSnapshotReply& reply);
+
 
 //反序列化： <args/reply>       <消息类型> <reqId>在外层进行解析
 std::optional<RequestVoteArgs> DeserializeRequestVoteArgs(std::istringstream& iss);
 std::optional<RequestVoteReply> DeserializeRequestVoteReply(std::istringstream& iss);
+
 std::optional<AppendEntriesArgs> DeserializeAppendEntriesArgs(std::istringstream& iss);
 std::optional<AppendEntriesReply> DeserializeAppendEntriesReply(std::istringstream& iss);
+
+std::optional<InstallSnapshotArgs> DeserializeInstallSnapshotArgs(std::istringstream& iss);
+std::optional<InstallSnapshotReply> DeserializeInstallSnapshotReply(std::istringstream& iss);
