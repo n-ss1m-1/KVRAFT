@@ -1,4 +1,5 @@
 #include<sstream>
+#include<cstring>       //std::memcpy()
 
 #include "raft/raft_message.h"
 
@@ -61,4 +62,41 @@ std::optional<std::pair<int64_t,int32_t>> DeserializeMeta(const std::string& lin
     if(tag!="META") return std::nullopt;
 
     return std::make_pair(currentTerm,votedFor);                //使用方法(不需要指定模板)! std::make_pair(v1,v2); 
+}
+
+//Snapshot序列化和反序列化
+std::string SerializeSnapshot(const Snapshot& snap)
+{
+    constexpr size_t kHeaderSize = sizeof(int64_t) * 3;
+    const int64_t dataLen = static_cast<int64_t>(snap.data.size());
+
+    std::string buf;
+    buf.resize(kHeaderSize);
+    std::memcpy(buf.data(),         &snap.lastIncludedIndex, sizeof(snap.lastIncludedIndex));
+    std::memcpy(buf.data() + 8,     &snap.lastIncludedTerm, sizeof(snap.lastIncludedTerm));
+    std::memcpy(buf.data() + 16,    &dataLen, sizeof(dataLen));
+    buf.append(snap.data);
+
+    return buf;
+}
+
+std::optional<Snapshot> DeserializeSnapshot(const std::string& raw)
+{
+    constexpr size_t kHeaderSize = sizeof(int64_t) * 3;
+    constexpr int64_t kMaxSnapshotSize = 1LL << 30;
+
+    if(raw.size() < kHeaderSize) return std::nullopt;
+
+    Snapshot snap;
+    int64_t dataLen = 0;
+    std::memcpy(&snap.lastIncludedIndex, raw.data(),      sizeof(snap.lastIncludedIndex));
+    std::memcpy(&snap.lastIncludedTerm,  raw.data() + 8,  sizeof(snap.lastIncludedTerm));
+    std::memcpy(&dataLen,                raw.data() + 16, sizeof(dataLen));
+
+    if(dataLen < 0 || dataLen > kMaxSnapshotSize) return std::nullopt;                  // dataLen: 为负 or 太大
+    if(static_cast<size_t>(dataLen) != raw.size()-kHeaderSize) return std::nullopt;     // dataLen与实际的data的长度不符
+
+    snap.data.assign(raw.data() + kHeaderSize, static_cast<size_t>(dataLen));
+
+    return snap;
 }

@@ -58,6 +58,14 @@ struct AppendEntriesReply
 
 
 //快照
+//! TODO:可以添加版本号，表示不同格式的快照(应对未来添加字段)
+struct Snapshot
+{
+    int64_t lastIncludedIndex = 0;
+    int64_t lastIncludedTerm = 0;
+    std::string data; 
+};
+
 struct InstallSnapshotArgs
 {
     int64_t term = 0;
@@ -88,4 +96,7 @@ std::string SerializeMeta(int64_t currentTerm,int32_t votedFor);
 std::optional<std::pair<int64_t,int32_t>> DeserializeMeta(const std::string& line);
 
 
+//Snapshot序列化和反序列化
+std::string SerializeSnapshot(const Snapshot& snap);
 
+std::optional<Snapshot> DeserializeSnapshot(const std::string& line);
