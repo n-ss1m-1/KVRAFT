@@ -395,7 +395,8 @@ void RaftNode::HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSna
     }
 
     // 5. 先将快照落盘(持久化)，失败则不动状态机/内存/日志，回报失败让Leader下轮重试
-    if(!storage_->SaveSnapshot(args.lastIncludedIndex,args.lastIncludedTerm,args.data))
+
+    if(!storage_->SaveSnapshot(Snapshot{args.lastIncludedIndex,args.lastIncludedTerm,args.data}))
     {
         spdlog::error("[Node {}] HandleInstallSnapshot: SaveSnapshot failed at index={}", 
             nodeId_, args.lastIncludedIndex);
@@ -950,7 +951,7 @@ void RaftNode::TakeSnapshot()
     const std::string data = stateMachine_->Serialize();
 
     // 4. 保存快照文件
-    if(!storage_->SaveSnapshot(snapshotIndex,snapshotTerm,data))
+    if(!storage_->SaveSnapshot(Snapshot{snapshotIndex,snapshotTerm,data}))
     {
         spdlog::error("[Node {}] TakeSnapshot: SaveSnapshot failed", nodeId_);
         return;                                                         //! 只有快照真正落盘后，才更新内存状态。 否则内存和磁盘不一致。

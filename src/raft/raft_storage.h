@@ -34,14 +34,6 @@ public:
     std::vector<LogEntry> LoadLogEntries(int64_t snapshotIndex = 0);
 
     //=========== 快照 ===========
-    //! TODO:可以添加版本号，表示不同格式的快照(应对未来添加字段)
-    struct Snapshot
-    {
-        int64_t lastIncludedIndex = 0;
-        int64_t lastIncludedTerm = 0;
-        std::string data;
-    };
-
     /*
      保存快照：先写到tmp 再原子替换(rename)
      快照格式：
@@ -50,7 +42,7 @@ public:
         [8字节 dataLen(字节数)]
         [data ...]
      */
-    bool SaveSnapshot(int64_t lastIncludedIndex,int64_t lastIncludedTerm,const std::string& data);
+    bool SaveSnapshot(const Snapshot& snap);
 
     // 加载快照：若返回nullopt则表示没有快照文件
     std::optional<Snapshot> LoadSnapshot();
@@ -71,12 +63,12 @@ private:
     //▲此处的Persister由RaftStorage私有，不需要外部访问->直接设置为值成员，而非shared_ptr
     Persister metaPersister_;
     Persister logPersister_;
+    Persister snapPersister_;
 
     //保证追加到磁盘的日志不会重复(Load时map去重)
     std::map<int64_t,int64_t> indexToOffset_;       // index -> 该日志在文件中的起始字节偏移量 (相较unordered_map，map是index有序的，遍历友好)
     int64_t lastPersistedIndex_ = 0;                // 最后持久化的日志index
 
-    std::string snapshotPath_;                  // 快照文件的路径
 };
 
 
@@ -99,7 +91,9 @@ Persister               ← 真正操作文件（open/write/fsync）
 生成快照的完整调用链：
 RaftNode::TakeSnapshot()
     ├── KVStore::Serialize()
-    ├── RaftStorage::SaveSnapshot(...)      ← 快照文件
+    ├── RaftStorage::SaveSnapshot(snap)      ← 快照文件
+    │        ├─── SerializeSnapshot(snap)
+    │        └─── Persister::OverwriteFile(snap)
     ├── RaftLog::SetSnapshotIndexAndTerm()  ← 内存日志起点
     └── RaftStorage::TruncateLogUpTo(K)     ← 物理日志截断
             │

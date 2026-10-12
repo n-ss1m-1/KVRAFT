@@ -39,7 +39,7 @@ static bool WriteAll(int fd, const void* buf, size_t len)
 RaftStorage::RaftStorage(const std::string& dataDir):          //dataDir 由 main 创建并保证存在
         metaPersister_(dataDir+"/meta.txt"),
         logPersister_(dataDir+"/raft.log"),
-        snapshotPath_(dataDir+"/snapshot.bin")          // 添加快照文件
+        snapPersister_(dataDir+"/snapshot.bin", /*needCreate=*/false)          // 添加快照文件交给Persister管理
 {
 }
 
@@ -53,7 +53,7 @@ std::pair<int64_t,int32_t> RaftStorage::LoadMeta()
     std::vector<std::string> lines = metaPersister_.LoadFromFile();
     if(lines.empty()) return {0,-1};                // 元状态为空，返回默认值  
 
-    // 取最后一行元状态，并将string转换为pair
+    // 取最后一行元状态，并将string转换为pair           TODO: 处理空行和错误行
     auto result = DeserializeMeta(lines.back());
     if(!result.has_value()) return {0,-1};          //数据无效，返回默认值
 
@@ -153,13 +153,9 @@ std::vector<LogEntry> RaftStorage::LoadLogEntries(int64_t snapshotIndex)
     lastPersistedIndex_ = snapshotIndex;                        // TODO: 此处可以由RaftNode::Recover()传进来，同时更改下方的expectedIndex
                                                                 // ok !▲此处其实是一个bug，因为当磁盘日志文件为空时，无法正确初始化lastPersistedIndex_
     // 2. 逐行扫描：index->{offset,entry}  
-    std::ifstream in(logPersister_.GetFileName());
-    if(!in.is_open()) return {};                //首次启动，无日志文件
-
     std::map<int64_t,std::pair<int64_t,LogEntry>> byIndex;          //!▲ 使用map去重
-    std::string line;
     int64_t offset = 0;
-    while(std::getline(in,line))
+    for(const auto& line : logPersister_.LoadFromFile())
     {
         int64_t lineOffset = offset;        // 该日志在文件中的起始字节偏移量
         offset += static_cast<int64_t>(line.size()) + 1;  // + 1 for '\n'
@@ -197,7 +193,7 @@ std::vector<LogEntry> RaftStorage::LoadLogEntries(int64_t snapshotIndex)
         expectedIndex++;
     }
 
-    // 4. (防御) 发现gep：物理文件中 gap 之后的垃圾必须清掉，否则后续追加后每次重启都加载不到尾部
+    // 4. (防御) 发现gap：物理文件中 gap 之后的垃圾必须清掉，否则后续追加后每次重启都加载不到尾部
     //           解决办法：用已校验的连续前缀重建干净的RaftStorage，Leader后续会把缺失部分补齐
     if(gapDetected)
     {
@@ -226,121 +222,48 @@ std::vector<LogEntry> RaftStorage::LoadLogEntries(int64_t snapshotIndex)
     return entries;
 }
 
-bool RaftStorage::SaveSnapshot(int64_t lastIncludedIndex,int64_t lastIncludedTerm,const std::string& data)
+bool RaftStorage::SaveSnapshot(const Snapshot& snap)
 {
-    spdlog::info("[Storage] SaveSnapshot: index={}, term={}, size={}",
-        lastIncludedIndex, lastIncludedTerm, data.size());
+    spdlog::info("[RaftStorage] SaveSnapshot: index={}, term={}, size={}",
+        snap.lastIncludedIndex, snap.lastIncludedTerm, snap.data.size());
 
-    std::string tmpPath = snapshotPath_+".tmp";
-
-    //1. 打开临时快照文件      //1.只写不读 2.文件不存在就创建 3.文件已存在就清空内容 4.fork/exec子进程时自动关闭该fd(不继承fd，避免fd泄露)                 
-    int fd = open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);     //! O_CLOEXEC是多线程时的必要防御手段
-    if(fd < 0)
+    if(!snapPersister_.OverwriteFile(SerializeSnapshot(snap)))
     {
-        spdlog::error("[RaftStorage] SaveSnapshot: open failed, errno={}: {}",errno,strerror(errno));
+        spdlog::error("[RaftStorage] SaveSnapshot: OverwriteFile failed: {}", snapPersister_.GetFileName());
         return false;
     }
-
-    //2. 写header (定长二进制?)
-    if(!WriteAll(fd, &lastIncludedIndex, sizeof(lastIncludedIndex)))      //! 为什么需要取地址：write接受 const void* 类型
-    {
-        close(fd);
-        return false;
-    }
-    if(!WriteAll(fd, &lastIncludedTerm, sizeof(lastIncludedTerm)))
-    {
-        close(fd);
-        return false;
-    }
-    int64_t dataLen = static_cast<int64_t>(data.size());         //! sizeof()：类型占多少字节   .size()：容器内的元素个数       
-    if(!WriteAll(fd, &dataLen, sizeof(dataLen)))
-    {
-        close(fd);
-        return false;
-    }
-
-    //3. 写data
-    if(!WriteAll(fd, data.data(), data.size()))             // .data()：返回指向字符串首个字符的地址(char*)
-    {
-        close(fd);
-        return false;
-    }
-
-    //4. fsync + close
-    if(fsync(fd) < 0)
-    {
-        spdlog::error("[RaftStorage] SaveSnapshot: fsync failed, errno={}: {}",errno,strerror(errno));
-        close(fd);
-        return false;
-    }
-    close(fd);
-
-    //5. 原子替换
-    if(std::rename(tmpPath.c_str(), snapshotPath_.c_str()) < 0)
-    {
-        spdlog::error("[RaftStorage] SaveSnapshot: rename failed, errno={}: {}",errno,strerror(errno));
-        return false;
-    }
-
-    // !TODO: rename只保证原子性，不保证持久性 -> 需要fsync父目录，确保rename刷盘
 
     return true;
 }
 
-std::optional<RaftStorage::Snapshot> RaftStorage::LoadSnapshot()
+std::optional<Snapshot> RaftStorage::LoadSnapshot()
 {
-    //1. 将快照文件作为输入流
-    std::ifstream in(snapshotPath_, std::ios::binary | std::ios::in);
-    if(!in.is_open())   //检查是否打开成功
+    if(!snapPersister_.Exists())
     {
-        return std::nullopt;        //没有快照文件
-    }
-
-    Snapshot snap;
-
-    //2. 读header
-    if(!in.read(reinterpret_cast<char*>(&snap.lastIncludedIndex),sizeof(snap.lastIncludedIndex)))         //! reinterpret_cast<>()：将一种类型的指针，强行解释成另一种类型的指针
-    {
-        spdlog::error("[RaftStorage] LoadSnapshot: read lastIncludedIndex failed, eof={}", in.eof());
-        return std::nullopt;
-    }
-    if(!in.read(reinterpret_cast<char*>(&snap.lastIncludedTerm),sizeof(snap.lastIncludedTerm)))
-    {
-        spdlog::error("[RaftStorage] LoadSnapshot: read lastIncludedTerm failed, eof={}", in.eof());
-        return std::nullopt;
-    }
-    int64_t dataLen;
-    if(!in.read(reinterpret_cast<char*>(&dataLen),sizeof(dataLen)))
-    {
-        spdlog::error("[RaftStorage] LoadSnapshot: read dataLen failed, eof={}", in.eof());
+        spdlog::error("[RaftStorage] LoadSnapshot: snapshot didn't exist");
         return std::nullopt;
     }
 
-    constexpr int64_t kMaxSnapshotSize = 1LL << 30;     //! 设置快照文件大小上限(1GB)，避免分配过多内存导致崩溃 
-    if(dataLen < 0 || dataLen > kMaxSnapshotSize) 
+    auto rawOpt = snapPersister_.ReadwholeFile();
+    if(!rawOpt.has_value())
     {
-        spdlog::error("[RaftStorage] LoadSnapshot: invalid dataLen={}", dataLen);
+        spdlog::error("[RaftStorage] LoadSnapshot: ReadwholeFile failed");
         return std::nullopt;
     }
 
-    //3. 读data
-    snap.data.resize(dataLen);
-    if(dataLen > 0 && !in.read(snap.data.data(),dataLen))
+    auto snapOpt = DeserializeSnapshot(rawOpt.value());
+    if(!snapOpt.has_value())
     {
-        spdlog::error("[RaftStorage] LoadSnapshot: read data failed, eof={}", in.eof());
+        spdlog::error("[RaftStorage] LoadSnapshot: DeserializeSnapshot failed");
         return std::nullopt;
     }
-    //! TODO：可选优化，检查dataLen与实际文件剩余长度是否匹配(如果文件被截断(写到一半崩溃了)，dataLen会大于实际数据)
-    //  但是上面的return nullopt也能兜住，此时不是错误
 
-    return snap;
+    return snapOpt.value();
 }
 
 bool RaftStorage::HasSnapshot() const
 {
-    if(snapshotPath_.empty()) return false;
-
-    return std::filesystem::exists(snapshotPath_);
+    return snapPersister_.Exists();
 }
 
 bool RaftStorage::TruncateLogUpTo(int64_t index)
