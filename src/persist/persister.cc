@@ -9,12 +9,16 @@
 
 
 //初始化文件名+打开文件
-Persister::Persister(const std::string& fileName)
+Persister::Persister(const std::string& fileName, bool needCreate)
     :fileName_(fileName)
 {
-    fd_=open(fileName_.c_str(),O_RDWR|O_APPEND|O_CREAT,0644);           //▲创建需要指定权限0644，否则可能出错
+    fd_ = needCreate
+        ? open(fileName_.c_str(),O_RDWR|O_APPEND|O_CREAT,0644)            //▲创建需要指定权限0644，否则可能出错
+        : open(fileName_.c_str(),O_RDWR|O_APPEND,0644);                 // 用于快照，初始不需要创建空文件
     if(fd_==-1)
     {
+        if(!needCreate && errno == ENOENT) return;      // 首次运行，尚无快照：正常 保持fd = -1
+
         spdlog::error("[Persister] Persister: construct failed, errno={}: {}",errno,strerror(errno));
     }
     else
@@ -83,18 +87,20 @@ std::optional<int64_t> Persister::AppendToFile(const std::string& line)
 }
 
 /*
-从日志文件中读取所有指令并返回
+从日志文件中读取 原始行(包含空行) 并返回
 怎么进行每行拆解？————使用ifstream和getline
 */
 std::vector<std::string> Persister::LoadFromFile()      //▲注：返回值而非引用(cpp会自动移动拷贝)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::vector<std::string> lines;
 
     std::string line;
     std::ifstream in(fileName_);
-    while(getline(in,line))
+    while(getline(in,line))         //! getline 会自动去除行尾 '\n'  -> 调用方计算字节偏移需要 +1
     {
-        if(!line.empty()) lines.emplace_back(line);
+        lines.emplace_back(line);       //! 空行也原样返回 -> 方便在RaftStorage中复用
     }
     return lines;
 }
@@ -131,6 +137,7 @@ const std::string& Persister::GetFileName() const
 
 int64_t Persister::Size()
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return size_;
 }
 
@@ -212,6 +219,107 @@ bool Persister::TruncateFront(int64_t bytesToRemove)
     size_ -= bytesToRemove;
 
     return fd_ >= 0;
+}
+
+bool Persister::OverwriteFile(const std::string& content)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 1. 打开tmp文件
+    const std::string tmpPath = fileName_ + ".tmp";
+    int tmpFd = open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if(tmpFd < 0)
+    {
+        spdlog::error("[Persister] OverwriteFile: open snap.bin.tmp failed, errno={}: {}",errno,strerror(errno));
+        return false;
+    }
+
+    // 2. 循环写 + fsync + close
+    size_t remaining = content.size();
+    const char* p = content.data();     // const char*居然可以移动
+    while(remaining > 0)
+    {
+        ssize_t n = write(tmpFd, p, remaining);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            spdlog::error("[Persister] OverwriteFile: write failed, errno={}: {}", errno, strerror(errno));
+            close(tmpFd);
+            unlink(tmpPath.c_str());
+            return false;
+        }
+        remaining -= n;
+        p += n;
+    }
+
+    if(fsync(tmpFd) < 0)
+    {
+        spdlog::error("[Persister] OverwriteFile: fsync snap.bin.tmp failed, errno={}: {}",errno,strerror(errno));
+        close(tmpFd);
+        unlink(tmpPath.c_str());
+        return false;
+    }
+    close(tmpFd);
+
+    // 3. rename
+    if(rename(tmpPath.c_str(), fileName_.c_str()) < 0)
+    {
+        spdlog::error("[Persister] OverwriteFile: rename failed, errno={}: {}", errno, strerror(errno));
+        unlink(tmpPath.c_str());    //! unlink?
+        return false;
+    }
+    // !TODO: rename只保证原子性，不保证持久性 -> 需要fsync父目录，确保rename刷盘
+
+    // 4. ReopenLocked
+    if(!ReopenLocked()) 
+    {
+        return false;
+    }
+    
+    // 5. 更新文件大小
+    size_ = static_cast<int64_t>(content.size());
+
+    return true;
+}
+
+std::optional<std::string> Persister::ReadwholeFile() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 重新打开文件(无O_APPEND)
+    int fd = open(fileName_.c_str(), O_RDONLY | O_CLOEXEC);
+    if(fd < 0) 
+    {
+        return std::nullopt;     // 快照不存在是正常的，不打error
+    }
+
+    // 循环读 + close
+    std::string buf;
+    size_t total = size_;
+    size_t offset = 0;
+    buf.resize(total);
+    while(offset < total)
+    {
+        ssize_t n = read(fd, buf.data()+offset, total-offset);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            spdlog::error("[Persister] ReadWholeFile: read failed, errno={}: {}", errno, strerror(errno));
+            close(fd);
+            return std::nullopt;
+        }
+        if(n == 0) break;
+        offset += n;
+    }
+
+    close(fd);
+
+    return buf;
+}
+
+bool Persister::Exists() const
+{
+    return access(fileName_.c_str(),F_OK) == 0;
 }
 
 bool Persister::TruncateLocked(int64_t size)
