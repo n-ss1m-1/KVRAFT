@@ -135,6 +135,61 @@ void RaftNode::SendInstallSnapshot(int32_t peerId,const InstallSnapshotArgs& arg
         });
 }
 
+void RaftNode::DrainPendingReads()
+{
+    // 找到可确认isLeader的最晚时间点(peerHeartbeatAckTimes_中第(n-1)/2小的时间点)
+    auto v = peerHeartbeatAckTimes_;
+    int k = (static_cast<int>(v.size()-1))/2;             // 节点个数->最晚有效时间的下标:  1->0  3->1  4->1  5->2  6->2
+    std::nth_element(v.begin(),v.begin()+k,v.end());
+    std::chrono::steady_clock::time_point validTime = v[k];
+
+    //!▲ 此处不能用`for(const auto& pr : pendingReads_)` :  pop_front()会让迭代器失效
+    while(!pendingReads_.empty())
+    {
+        const auto& pr = pendingReads_.front();
+
+        //! 先确认任期是否合理
+        if(pr.term < currentTerm_)
+        {
+            readCallbacksToRun_.emplace_back(pr.callback,false);
+            pendingReads_.pop_front();
+            continue;                       // 后续不执行
+        }
+
+        // pr的请求时间在可以确认是Leader是时间段内 && 相应请求必定提交
+        if(pr.bornTime <= validTime && pr.readIndex <= lastApplied_) 
+        {
+            readCallbacksToRun_.emplace_back(pr.callback,true);
+            pendingReads_.pop_front();
+        }
+        else break;         //! 后续的均不可能(请求时间 和 readIndex 均是递增的)
+    }
+
+}
+
+void RaftNode::AbortPendingReads()
+{
+    //!▲ 此处不能用`for(const auto& pr : pendingReads_)` :  pop_front()会让迭代器失效
+    while(!pendingReads_.empty())
+    {
+        readCallbacksToRun_.emplace_back(pendingReads_.front().callback,false);
+        pendingReads_.pop_front();
+    }
+}
+
+void RaftNode::FlushPendingReads()
+{
+    std::vector<std::pair<ReadCallback,bool>> tmp;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tmp.swap(readCallbacksToRun_);
+    }
+    for(const auto& [cb,ok] : tmp)
+    {
+        cb(ok);
+    }
+}
+
 // 向所有 Follower 发送 AppendEntries：
 // - Follower 已同步：entries 为空（纯心跳）
 // - Follower 落后：entries 带上缺失的日志
@@ -228,196 +283,246 @@ void RaftNode::SendHeartbeat()
     }
 }
 
+void RaftNode::ReadIndex(ReadCallback cb)
+{
+    ReadCallback notLeader;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(role_ == Role::Leader)                           // clientServer检查完之后会解锁，中间的间隔可能发生身份转换，此处用来兜底
+        {
+            // 构造pendingRead -> 插入pendingReads_
+            PendingRead pr;
+            pr.readIndex = commitIndex_;
+            pr.term = currentTerm_;
+            pr.bornTime = std::chrono::steady_clock::now();
+            pr.callback = std::move(cb);
+
+            pendingReads_.push_back(pr);
+        }
+        else notLeader = std::move(cb);
+        
+        DrainPendingReads();        //!▲ 应对单节点
+    }
+
+    // 锁外flush / 执行失败回调
+    if(notLeader)   notLeader(false);
+    else            
+    {
+        FlushPendingReads();                    // 应对上面的Drain
+        // 立刻发送心跳 -> 真正确认Leader身份
+        SendHeartbeat();
+    }
+}
+
 void RaftNode::HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& reply)
 {
-    spdlog::debug("[Node {} <- {}] RequestVote term={}, lastLog=({},{}), my.term={}, my.role={}, votedFor={}",
+    spdlog::info("[Node {} <- {}] RequestVote term={}, lastLog=({},{}), my.term={}, my.role={}, votedFor={}",
         nodeId_, args.candidateId, args.term, args.lastLogTerm, args.lastLogIndex, currentTerm_, RoleName(role_), votedFor_);
     
-    //此处为顶层函数 -> 加锁
-    std::lock_guard<std::mutex> lock(mutex_);
+    {        
+        //此处为顶层函数 -> 加锁
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    //!不能在此处设置reply.term = currentTerm_   若reply.term > currentTerm_  则follower传回时被candidate认为是一个过期的回复 该投票在candidate处不会起效 但是此时follower实际上投票了 导致错误 
-    reply.voteGranted = false;
-    
-    //1. 检查term
-    if(args.term<currentTerm_)            //▲! 过时的候选者不能成为Leader
-    {
-        spdlog::debug("[Node {}] Vote REJECT: args.term={} < my.term={}",
-            nodeId_, args.term, currentTerm_);
+        //!不能在此处设置reply.term = currentTerm_   若reply.term > currentTerm_  则follower传回时被candidate认为是一个过期的回复 该投票在candidate处不会起效 但是此时follower实际上投票了 导致错误 
+        reply.voteGranted = false;
 
-        reply.term = currentTerm_;
-        return;                             
+        //1. 检查term
+        if(args.term<currentTerm_)            //▲! 过时的候选者不能成为Leader
+        {
+            spdlog::debug("[Node {}] Vote REJECT: args.term={} < my.term={}",
+                nodeId_, args.term, currentTerm_);
+
+            reply.term = currentTerm_;
+            return;                             
+        }
+        else if(args.term>currentTerm_)     BecomeFollower(args.term);          //▲! 候选者比我更加新 则我跟随   !BecomeFollower内部会更新currentTerm_
+
+        reply.term=currentTerm_;
+
+        //2. 检查是否已投过票(▲!可以重复投给同一候选者_消息丢失_幂等无影响)
+        if(votedFor_!=-1 && votedFor_!=args.candidateId) 
+        {
+            spdlog::debug("[Node {}] Vote REJECT: already voted for {}",
+                nodeId_, votedFor_);
+            return;                // 根据votedFor_是否被改变来判断-是否投过票 此轮任期是否已经投票(一轮最多投一次)
+        }
+
+        //3. ▲!检查候选者的日志新旧(先比较lastLogtTerm 再比较lastLogIndex)
+        if(log_.LastTerm()>args.lastLogTerm || (log_.LastTerm()==args.lastLogTerm && log_.LastIndex()>args.lastLogIndex)) 
+        {
+            spdlog::debug("[Node {}] Vote REJECT: my log (term={},idx={}) newer than candidate's (term={},idx={}",
+                nodeId_, log_.LastTerm(), log_.LastIndex(), args.lastLogTerm, args.lastLogIndex);
+            return;
+        }
+
+        //4. 投票 + ▲!持久化
+        votedFor_ = args.candidateId;
+        reply.voteGranted = true;
+
+        PersistMeta();
     }
-    else if(args.term>currentTerm_)     BecomeFollower(args.term);          //▲! 候选者比我更加新 则我跟随   !BecomeFollower内部会更新currentTerm_
-
-    reply.term=currentTerm_;
-    
-    //2. 检查是否已投过票(▲!可以重复投给同一候选者_消息丢失_幂等无影响)
-    if(votedFor_!=-1 && votedFor_!=args.candidateId) 
-    {
-        spdlog::debug("[Node {}] Vote REJECT: already voted for {}",
-            nodeId_, votedFor_);
-        return;                // 根据votedFor_是否被改变来判断-是否投过票 此轮任期是否已经投票(一轮最多投一次)
-    }
-
-    //3. ▲!检查候选者的日志新旧(先比较lastLogtTerm 再比较lastLogIndex)
-    if(log_.LastTerm()>args.lastLogTerm || (log_.LastTerm()==args.lastLogTerm && log_.LastIndex()>args.lastLogIndex)) 
-    {
-        spdlog::debug("[Node {}] Vote REJECT: my log (term={},idx={}) newer than candidate's (term={},idx={}",
-            nodeId_, log_.LastTerm(), log_.LastIndex(), args.lastLogTerm, args.lastLogIndex);
-        return;
-    }
-
-    //4. 投票 + ▲!持久化
-    votedFor_ = args.candidateId;
-    reply.voteGranted = true;
-    
-    PersistMeta();
-    
     spdlog::info("[Node {}] Vote GRANTED to candidate {} term={}",nodeId_,args.candidateId,currentTerm_);
+
+    // BecomeFollower()里可能abortPendginReads(), 且swap空vector开销可忽略不计
+    FlushPendingReads();
 }
 
 //!注意实现逻辑
 void RaftNode::HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesReply& reply)
 {
-    //!读取共享数据需要加锁
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    reply.success = false;
-    reply.term = currentTerm_;      //!覆盖>=<三种情况 刚才漏了=的情况
+    {    
+        //!读取共享数据需要加锁
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        reply.success = false;
+        reply.term = currentTerm_;      //!覆盖>=<三种情况 刚才漏了=的情况
 
-    spdlog::debug("[Node {} ← leader {}] AppendEntries term={}, prevLog=({},{}), entries.size={}, leaderCommit={}, my.term={}, my.lastLog=({},())",
-        nodeId_, args.leaderId, args.term, args.prevLogTerm, args.prevLogIndex, args.entries.size(), args.leaderCommit, currentTerm_, log_.LastTerm(), log_.LastIndex());
-    
-    //1. 检查term
-    if(currentTerm_ > args.term) 
-    {
-        spdlog::debug("[Node {}] reject AppendEntries: stale term {} < {} = my.term",
-            nodeId_, args.term, currentTerm_);
-        return;                     //过期的Leader
+        spdlog::info("[Node {} ← leader {}] AppendEntries term={}, prevLog=({},{}), entries.size={}, leaderCommit={}, my.term={}, my.lastLog=({},())",
+            nodeId_, args.leaderId, args.term, args.prevLogTerm, args.prevLogIndex, args.entries.size(), args.leaderCommit, currentTerm_, log_.LastTerm(), log_.LastIndex());
+        
+        //1. 检查term
+        if(currentTerm_ > args.term) 
+        {
+            spdlog::debug("[Node {}] reject AppendEntries: stale term {} < {} = my.term",
+                nodeId_, args.term, currentTerm_);
+            return;                     //过期的Leader
+        }
+        if(currentTerm_ < args.term) 
+        {
+            BecomeFollower(args.term);      //内部会更新currentTerm_  所以要后赋值term
+            reply.term = currentTerm_;
+        }
+
+        //2. 重置选举超时
+        electionResetTime_ = std::chrono::steady_clock::now();
+
+        //3. 记录leaderId，供客户端重定向
+        leaderId_ = args.leaderId;
+
+        //4. 一致性检查
+        auto check = log_.CheckConsistency(args.prevLogIndex,args.prevLogTerm);
+        if(!check.ok)
+        {
+            spdlog::debug("[Node {}] consistency FAIL: prevLog=({},{}), my.lastLog=({},{}), conflictIndex={}",
+                nodeId_, args.prevLogTerm,args.prevLogIndex, log_.LastTerm(),log_.LastIndex(), check.conflictIndex);
+
+            //TODO：-1  发送快照
+            reply.conflictIndex = check.conflictIndex;
+            return;
+        }
+
+        //5. 日志复制(内存+磁盘)           ▲!无论entries是否为空，总是调用下面的方法，因为可能需要日志截断
+        //理论上不应该出错
+        if(!log_.AppendFrom(args.prevLogIndex+1,args.entries))
+        {
+            spdlog::error("[Node {}] log.AppendFrom FAILED: startIndex={}, entries.size={}",
+                nodeId_, args.prevLogIndex+1,args.entries.size());
+            //! 填入非法值表示严重错误 而非日志冲突(此处说明需要添加的日志在快照中，快照需要被覆盖，此时需要Leader发送快照)
+            reply.conflictIndex = -1;
+            return;
+        }
+        if(!storage_->AppendLogEntriesFrom(args.prevLogIndex+1,args.entries))       //▲ 截断+追加，保证日志无重复
+        {
+            spdlog::error("[Node {}] storage.AppendLogEntriesFrom FAILED: startIndex={}, entries.size={}",
+                nodeId_, args.prevLogIndex+1,args.entries.size());
+            //! 填入非法值表示严重错误 而非日志冲突
+            reply.conflictIndex = -1;
+            return;
+        }
+        
+        if(!args.entries.empty()) spdlog::debug("[Node {}] appended {} entries, new lastLogIndex={}",
+            nodeId_, args.entries.size(), log_.LastIndex());
+
+        //6. 更新commitIndex_
+        int64_t oldCommit = commitIndex_;
+        if(args.leaderCommit > commitIndex_)
+        {
+            //新的commitIndex不能超过自己的LastIndex(Leader已提交的日志可能我还没有)
+            commitIndex_ = std::min(args.leaderCommit,log_.LastIndex());
+        }
+        if(commitIndex_ > oldCommit) spdlog::debug("[Node {}] commitIndex: {} -> {}", 
+            nodeId_, oldCommit, commitIndex_);
+        
+
+        //7. 应用到状态机
+        ApplyCommittedEntries();
+
+        spdlog::info("[Node {}] REPLY CHECK: lastIndex={}, snapshotIndex={}, Size={}, prevLogIndex={}, entries.size={}",
+            nodeId_, log_.LastIndex(), log_.SnapshotIndex(), log_.Size(),args.prevLogIndex, args.entries.size());
+
+        //8. 确认reply->success
+        reply.success = true;
+        reply.matchIndex = log_.LastIndex();
     }
-    if(currentTerm_ < args.term) 
-    {
-        BecomeFollower(args.term);      //内部会更新currentTerm_  所以要后赋值term
-        reply.term = currentTerm_;
-    }
 
-    //2. 重置选举超时
-    electionResetTime_ = std::chrono::steady_clock::now();
-
-    //3. 记录leaderId，供客户端重定向
-    leaderId_ = args.leaderId;
-
-    //4. 一致性检查
-    auto check = log_.CheckConsistency(args.prevLogIndex,args.prevLogTerm);
-    if(!check.ok)
-    {
-        spdlog::debug("[Node {}] consistency FAIL: prevLog=({},{}), my.lastLog=({},{}), conflictIndex={}",
-            nodeId_, args.prevLogTerm,args.prevLogIndex, log_.LastTerm(),log_.LastIndex(), check.conflictIndex);
-
-        //TODO：-1  发送快照
-        reply.conflictIndex = check.conflictIndex;
-        return;
-    }
-
-    //5. 日志复制(内存+磁盘)           ▲!无论entries是否为空，总是调用下面的方法，因为可能需要日志截断
-    //理论上不应该出错
-    if(!log_.AppendFrom(args.prevLogIndex+1,args.entries))
-    {
-        spdlog::error("[Node {}] log.AppendFrom FAILED: startIndex={}, entries.size={}",
-            nodeId_, args.prevLogIndex+1,args.entries.size());
-        //! 填入非法值表示严重错误 而非日志冲突(此处说明需要添加的日志在快照中，快照需要被覆盖，此时需要Leader发送快照)
-        reply.conflictIndex = -1;
-        return;
-    }
-    if(!storage_->AppendLogEntriesFrom(args.prevLogIndex+1,args.entries))       //▲ 截断+追加，保证日志无重复
-    {
-        spdlog::error("[Node {}] storage.AppendLogEntriesFrom FAILED: startIndex={}, entries.size={}",
-            nodeId_, args.prevLogIndex+1,args.entries.size());
-        //! 填入非法值表示严重错误 而非日志冲突
-        reply.conflictIndex = -1;
-        return;
-    }
-    
-    if(!args.entries.empty()) spdlog::debug("[Node {}] appended {} entries, new lastLogIndex={}",
-        nodeId_, args.entries.size(), log_.LastIndex());
-
-    //6. 更新commitIndex_
-    int64_t oldCommit = commitIndex_;
-    if(args.leaderCommit > commitIndex_)
-    {
-        //新的commitIndex不能超过自己的LastIndex(Leader已提交的日志可能我还没有)
-        commitIndex_ = std::min(args.leaderCommit,log_.LastIndex());
-    }
-    if(commitIndex_ > oldCommit) spdlog::debug("[Node {}] commitIndex: {} -> {}", 
-        nodeId_, oldCommit, commitIndex_);
-    
-
-    //7. 应用到状态机
-    ApplyCommittedEntries();
-
-    spdlog::info("[Node {}] REPLY CHECK: lastIndex={}, snapshotIndex={}, Size={}, prevLogIndex={}, entries.size={}",
-        nodeId_, log_.LastIndex(), log_.SnapshotIndex(), log_.Size(),args.prevLogIndex, args.entries.size());
-
-    //8. 确认reply->success
-    reply.success = true;
-    reply.matchIndex = log_.LastIndex();
+    // BecomeFollower()里可能abortPendginReads(), 且swap空vector开销可忽略不计
+    FlushPendingReads();
 }
 
 void RaftNode::HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSnapshotReply& reply)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    {    
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    reply.success = false;
-    reply.term = currentTerm_;
-   
-    // 1. 检查term
-    if(currentTerm_ > args.term)
-    {
-        spdlog::debug("[Node {}] reject InstallSnapshot: stale term {} < {} = my.term",
-            nodeId_, args.term, currentTerm_);
-        return;                     //过期的Leader
-    }
-
-    // 2. 重置选举超时
-    electionResetTime_ = std::chrono::steady_clock::now();
-
-    // 3. 记录LeaderId
-    leaderId_ = args.leaderId;
-
-    // 4.1  快照比本地旧 → 回报本地快照点，成功返回，不动自己
-    if (args.lastIncludedIndex <= log_.SnapshotIndex()) {
-        spdlog::info("[Node {}] ignore older snapshot: leader={}, mine={}",
-                     nodeId_, args.lastIncludedIndex, log_.SnapshotIndex());
-        reply.lastIncludedIndex = log_.SnapshotIndex();
-        reply.success = true;
-        return;
-    }
-
-    // 5. 先将快照落盘(持久化)，失败则不动状态机/内存/日志，回报失败让Leader下轮重试
-
-    if(!storage_->SaveSnapshot(Snapshot{args.lastIncludedIndex,args.lastIncludedTerm,args.data}))
-    {
-        spdlog::error("[Node {}] HandleInstallSnapshot: SaveSnapshot failed at index={}", 
-            nodeId_, args.lastIncludedIndex);
-        return;
-    }
-
-    // 4.2 Leader发送的快照更加新 + 快照成功落盘 -> 再采纳 
-    spdlog::info("[Node {}] installing snapshot: LastIncludedIndex={}, LastIncludedTerm={}, size={}",
-        nodeId_, args.lastIncludedIndex, args.lastIncludedTerm, args.data.size());
+        reply.success = false;
+        reply.term = currentTerm_;
     
-    stateMachine_->Deserialize(args.data);
-    log_.SetSnapshotIndexAndTerm(args.lastIncludedIndex,args.lastIncludedTerm);
-    commitIndex_ = lastApplied_ = args.lastIncludedIndex;
+        // 1. 检查term
+        if(currentTerm_ > args.term)
+        {
+            spdlog::debug("[Node {}] reject InstallSnapshot: stale term {} < {} = my.term",
+                nodeId_, args.term, currentTerm_);
+            return;                     //过期的Leader
+        }
+        if(currentTerm_ < args.term) 
+        {
+            BecomeFollower(args.term);      //内部会更新currentTerm_  所以要后赋值term
+            reply.term = currentTerm_;
+        }
 
-    if(!storage_->TruncateLogUpTo(args.lastIncludedIndex))
-    {
-        spdlog::warn("[Node {}] HandleInstallSnapshot: TruncateLogUpTo({}) failed",
-            nodeId_, args.lastIncludedIndex);
+        // 2. 重置选举超时
+        electionResetTime_ = std::chrono::steady_clock::now();
+
+        // 3. 记录LeaderId
+        leaderId_ = args.leaderId;
+
+        // 4.1  快照比本地旧 → 回报本地快照点，成功返回，不动自己
+        if (args.lastIncludedIndex <= log_.SnapshotIndex()) {
+            spdlog::info("[Node {}] ignore older snapshot: leader={}, mine={}",
+                        nodeId_, args.lastIncludedIndex, log_.SnapshotIndex());
+            reply.lastIncludedIndex = log_.SnapshotIndex();
+            reply.success = true;
+            return;
+        }
+
+        // 5. 先将快照落盘(持久化)，失败则不动状态机/内存/日志，回报失败让Leader下轮重试
+
+        if(!storage_->SaveSnapshot(Snapshot{args.lastIncludedIndex,args.lastIncludedTerm,args.data}))
+        {
+            spdlog::error("[Node {}] HandleInstallSnapshot: SaveSnapshot failed at index={}", 
+                nodeId_, args.lastIncludedIndex);
+            return;
+        }
+
+        // 4.2 Leader发送的快照更加新 + 快照成功落盘 -> 再采纳 
+        spdlog::info("[Node {}] installing snapshot: LastIncludedIndex={}, LastIncludedTerm={}, size={}",
+            nodeId_, args.lastIncludedIndex, args.lastIncludedTerm, args.data.size());
+        
+        stateMachine_->Deserialize(args.data);
+        log_.SetSnapshotIndexAndTerm(args.lastIncludedIndex,args.lastIncludedTerm);
+        commitIndex_ = lastApplied_ = args.lastIncludedIndex;
+
+        if(!storage_->TruncateLogUpTo(args.lastIncludedIndex))
+        {
+            spdlog::warn("[Node {}] HandleInstallSnapshot: TruncateLogUpTo({}) failed",
+                nodeId_, args.lastIncludedIndex);
+        }
+
+        reply.success = true;
     }
 
-    reply.success = true;
+    // BecomeFollower()里可能abortPendginReads(), 且swap空vector开销可忽略不计
+    FlushPendingReads();
 }
 
 void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& reply)
@@ -472,6 +577,9 @@ void RaftNode::HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& re
 
     // !RPC消息在锁外发送
     if(becomeLeader) SendHeartbeat();
+
+    // BecomeFollower()里可能abortPendginReads(), 且swap空vector开销可忽略不计
+    FlushPendingReads();
 }
 
 //!注意实现逻辑
@@ -479,6 +587,7 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
 { 
     bool needNotify = false;
     bool needSnapshot = false;
+    bool needFlush = false;
     {   
         //!读取共享数据需要加锁
         std::lock_guard<std::mutex> lock(mutex_);
@@ -494,55 +603,68 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         if(currentTerm_ > reply.term) return;   //! 过期回复
 
         //2. !再次检查角色
-        if(!(role_==Role::Leader)) return;
-
-        spdlog::info("[Node {}] HandleAppendEntriesReply from peer {} success={} matchIndex={} conflictIndex={} → nextIndex={}",
-            nodeId_,peerId,reply.success,reply.matchIndex,reply.conflictIndex,nextIndex_[peerId]);
-
-        //3. success分支
-        // 规定nodeId_即为nextIndex_和matchIndex_的对应下标
-        if(reply.success)
+        if(!(role_==Role::Leader))          // 不能直接return 否则后续无法flush
         {
-            int64_t oldMatch = matchIndex_[peerId];
-            
-            //▲! RPC可能乱序到达：不允许旧的回复(matchIndex更小的回复)更新此处，不能把进度往回拉
-            if(reply.matchIndex > matchIndex_[peerId])
-            {
-                matchIndex_[peerId] = reply.matchIndex;
-                nextIndex_[peerId] = matchIndex_[peerId] + 1;
-            }
-            
-
-            spdlog::debug("[Node {}(leader)] <- peer {} ACK Append: matchIndex {} -> {}, nextIndex={}",
-                nodeId_, peerId, oldMatch, matchIndex_[peerId], nextIndex_[peerId]);
-
-            int64_t oldCommitIndex = commitIndex_;
-            UpdateCommitIndex();                            //! 每次收到follower提交 -> 检查是否达到大多数 -> 即检查是否达成共识
-            if(oldCommitIndex < commitIndex_)
-            {
-                needNotify = true;
-            }
-        }
-        else if(reply.conflictIndex == config::kNeedSnapshot)
-        {
-            needSnapshot = true;
+            needFlush = true;
         }
         else
-        {
-            int64_t oldNext = nextIndex_[peerId];
-            int64_t minAllowed = log_.SnapshotIndex() + 1;      //bug !▲易错 conflictIndex 不能小于 SnapshotIndex() + 1    避免回退到快照前(会导致死循环)
-            if(reply.conflictIndex >= minAllowed)
+        {    
+            spdlog::info("[Node {}] HandleAppendEntriesReply from peer {} success={} matchIndex={} conflictIndex={} → nextIndex={}",
+                nodeId_,peerId,reply.success,reply.matchIndex,reply.conflictIndex,nextIndex_[peerId]);
+            
+            //! 无论是success还是conflict，此刻"我"都是被承认的Leader，则更新心跳回复时间
+            peerHeartbeatAckTimes_[peerId] = std::chrono::steady_clock::now();
+
+            //3. success分支
+            // 规定nodeId_即为nextIndex_和matchIndex_的对应下标
+            if(reply.success)
             {
-                nextIndex_[peerId] = reply.conflictIndex;
+                int64_t oldMatch = matchIndex_[peerId];
+                int64_t oldCommitIndex = commitIndex_;          //! oldCommit需要在UpdateCommitIndex()前记录
+                
+                //▲! RPC可能乱序到达：不允许旧的回复(matchIndex更小的回复)更新此处，不能把进度往回拉
+                if(reply.matchIndex > matchIndex_[peerId])
+                {
+                    matchIndex_[peerId] = reply.matchIndex;
+                    nextIndex_[peerId] = matchIndex_[peerId] + 1;
+
+                    // 真正更新matchIndex_的地方，才有可能UpdateCommitIndex，所以放进来
+                    UpdateCommitIndex();                        //! 每次收到follower提交 -> 检查是否达到大多数 -> 即检查是否达成共识
+                }
+                
+                spdlog::debug("[Node {}(leader)] <- peer {} ACK Append: matchIndex {} -> {}, nextIndex={}",
+                    nodeId_, peerId, oldMatch, matchIndex_[peerId], nextIndex_[peerId]);
+
+                if(oldCommitIndex < commitIndex_)
+                {
+                    needNotify = true;
+                }
+            }
+            else if(reply.conflictIndex == config::kNeedSnapshot)
+            {
+                needSnapshot = true;
             }
             else
             {
-                nextIndex_[peerId] = minAllowed;                //!▲ nextIndex_回退的下限：快照点 + 1 
-                needSnapshot = true;                        //Follower 要的位置比我的快照还旧，必须发快照
+                int64_t oldNext = nextIndex_[peerId];
+                int64_t minAllowed = log_.SnapshotIndex() + 1;      //bug !▲易错 conflictIndex 不能小于 SnapshotIndex() + 1    避免回退到快照前(会导致死循环)
+                if(reply.conflictIndex >= minAllowed)
+                {
+                    nextIndex_[peerId] = reply.conflictIndex;
+                }
+                else
+                {
+                    nextIndex_[peerId] = minAllowed;                //!▲ nextIndex_回退的下限：快照点 + 1 
+                    needSnapshot = true;                        //Follower 要的位置比我的快照还旧，必须发快照
+                }
+                
+                spdlog::debug("[Node {}(Leader)] <- peer {} REJECT Append, nextIndex: {} -> {} (conflictIndex={})", 
+                    nodeId_, peerId, oldNext, nextIndex_[peerId], reply.conflictIndex);
             }
-            
-            spdlog::debug("[Node {}(Leader)] <- peer {} REJECT Append, nextIndex: {} -> {} (conflictIndex={})", 
-                nodeId_, peerId, oldNext, nextIndex_[peerId], reply.conflictIndex);
+
+            // 此处可能UpdateCommitIndex() 但是一定收到心跳回复 -> 故一定需要Drain检查 /后续flush若为空开销可忽略
+            DrainPendingReads();                        // UpdateCommitIndex()后锁内调用：将所有可执行的pendingRead的回调插入readCallbacksToRun_
+            needFlush = true;
         }
     }
     //▲! 最好不做立即重新发送SendAppendEntries：让Tick()的心跳自然触发下一次发送
@@ -562,75 +684,90 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
         if(snap.has_value())
         {
             std::lock_guard<std::mutex>lock(mutex_);
-            if(role_ != Role::Leader) return;           //再次加锁需要检查身份
-
-            snapArgs.term = currentTerm_;
-            snapArgs.leaderId = nodeId_;
-            snapArgs.lastIncludedIndex = snap->lastIncludedIndex;
-            snapArgs.lastIncludedTerm = snap->lastIncludedTerm;
-            snapArgs.data = std::move(snap->data);
-            snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());
-            snapshotReady = true;
+            if(role_ == Role::Leader)            //再次加锁需要检查身份
+            {    
+                snapArgs.term = currentTerm_;
+                snapArgs.leaderId = nodeId_;
+                snapArgs.lastIncludedIndex = snap->lastIncludedIndex;
+                snapArgs.lastIncludedTerm = snap->lastIncludedTerm;
+                snapArgs.data = std::move(snap->data);
+                snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());
+                snapshotReady = true;
+                SendInstallSnapshot(peerId,snapArgs);
+            }
         }
         else
         {
             spdlog::error("[Node {}] no snapshot but peers need it", nodeId_);
         }
-        SendInstallSnapshot(peerId,snapArgs);
     }
+    
+    // 取出pendingReadCallbacks(swap)
+    if(needFlush) FlushPendingReads();
 }
 
 void RaftNode::HandleInstallSnapshotReply(int32_t peerId, const InstallSnapshotReply& reply)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    bool needFlush = false;
+    {    
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    // 1. 检查term
-    if(currentTerm_ < reply.term)
-    {
-        spdlog::warn("[Node {}(Leader)] HandleInstallSnapshotReply from peer {} higher term {} > {} = my.term, stepping down",
-                nodeId_, peerId, reply.term, currentTerm_);
-        BecomeFollower(reply.term);         //内部会更新currentTerm_ 
-    }
-
-    if(currentTerm_ > reply.term) return;       //过期的回复
-
-    // 2. 检查身份
-    if(!(role_==Role::Leader)) return;
-
-    spdlog::info("[Node {}(Leader)] HandleInstallSnapshotReply from peer {} success={}",
-            nodeId_,peerId,reply.success);
-
-    // 3. 处理回复的结果
-    if(reply.success)
-    {
-        int64_t installed = reply.lastIncludedIndex;
-
-        //▲! 只在快照比已知的 matchIndex 更新时才更新
-        if(installed > matchIndex_[peerId])
+        // 1. 检查term
+        if(currentTerm_ < reply.term)
         {
-            matchIndex_[peerId] = installed;
-            nextIndex_[peerId] = installed + 1;
+            spdlog::warn("[Node {}(Leader)] HandleInstallSnapshotReply from peer {} higher term {} > {} = my.term, stepping down",
+                    nodeId_, peerId, reply.term, currentTerm_);
+            BecomeFollower(reply.term);         //内部会更新currentTerm_ 
         }
-        // 否则说明这个快照回复是过期的（Follower 已经更靠前了），忽略
-        
-        spdlog::info("[Node {}(Leader)] HandleInstallSnapshotReply: peer {} installed snapshot, nextIndex={}, matchIndex={}",
-            nodeId_, peerId, nextIndex_[peerId], matchIndex_[peerId]);
-    }
-    else
-    {
-        spdlog::warn("[Node {}(Leader)] HandleInstallSnapshotReply: peer {} rejected snapshot",nodeId_, peerId);
+
+        if(currentTerm_ > reply.term) return;       //过期的回复
+
+        // 2. 检查身份
+        if(!(role_==Role::Leader))              // 不能直接return 否则后续无法flush
+        {
+            needFlush = true;
+        }
+        else
+        {    
+            spdlog::info("[Node {}(Leader)] HandleInstallSnapshotReply from peer {} success={}",
+                    nodeId_,peerId,reply.success);
+
+            // 3. 处理回复的结果
+            if(reply.success)
+            {
+                int64_t installed = reply.lastIncludedIndex;
+
+                //▲! 只在快照比已知的 matchIndex 更新时才更新
+                if(installed > matchIndex_[peerId])
+                {
+                    matchIndex_[peerId] = installed;
+                    nextIndex_[peerId] = installed + 1;
+                }
+                // 否则说明这个快照回复是过期的（Follower 已经更靠前了），忽略
+                
+                spdlog::info("[Node {}(Leader)] HandleInstallSnapshotReply: peer {} installed snapshot, nextIndex={}, matchIndex={}",
+                    nodeId_, peerId, nextIndex_[peerId], matchIndex_[peerId]);
+            }
+            else
+            {
+                spdlog::warn("[Node {}(Leader)] HandleInstallSnapshotReply: peer {} rejected snapshot",nodeId_, peerId);
+            }
+
+            /* !▲
+            此处不调用UpdateCommitIndex(): 
+            ApplyCommittedEntries() -> 会检查是否需要takesnapshot() ->
+            -> commited && applied 的日志才会加入快照
+            -> snapshotIndex_ <= commitIndex_（不变式）
+            若在此处调用 UpdateCommitIndex() 不会让大多数 matchIndex 前进到超过 commitIndex_
+            commitIndex_ 只会由后续的 AppendEntries(心跳) 推进
+
+            不过，也可以为了 对称+防御未来改动 加上这块调用，现在暂时不加(TODO)
+            */
+        }
     }
 
-    /* !▲
-    此处不调用UpdateCommitIndex(): 
-      ApplyCommittedEntries() -> 会检查是否需要takesnapshot() ->
-      -> commited && applied 的日志才会加入快照
-      -> snapshotIndex_ <= commitIndex_（不变式）
-      若在此处调用 UpdateCommitIndex() 不会让大多数 matchIndex 前进到超过 commitIndex_
-      commitIndex_ 只会由后续的 AppendEntries(心跳) 推进
-
-      不过，也可以为了 对称+防御未来改动 加上这块调用，现在暂时不加(TODO)
-    */
+    // BecomeFollower()里可能abortPendginReads(), 且swap空vector开销可忽略不计
+    FlushPendingReads();
 }
 
 //超时：StartElection() 或 SendHeartbeat()
@@ -638,6 +775,7 @@ void RaftNode::Tick()
 {
     bool shouldStartElection = false;
     bool shouldSendHeartbeat = false;
+    bool shouldFlushPendingRead = false;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -645,6 +783,7 @@ void RaftNode::Tick()
         auto now = std::chrono::steady_clock::now();            //! 学习一下使用方法
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - electionResetTime_).count();   //1 millisecond (ms，毫秒) = 1000 microseconds (us，微秒)
 
+        // 判断是否需要发心跳 / 是否需要启动选举
         if(role_ == Role::Leader)       // Leader：定期发心跳
         {
             if(elapsedMs >= static_cast<int64_t>(kHeartbeatIntervalMs_))
@@ -662,11 +801,22 @@ void RaftNode::Tick()
                 electionTimeoutMs_ = randomTimeoutMs(150,300);          //! 重新随机超时时间
             }
         }
+
+        // 判断pendingRead是否超时
+        while(!pendingReads_.empty() && now - pendingReads_.front().bornTime > std::chrono::milliseconds(500))
+        {
+            shouldFlushPendingRead = true;
+            readCallbacksToRun_.emplace_back(pendingReads_.front().callback, false);
+            pendingReads_.pop_front();
+        }
     }
 
     //RPC发送消息、顶层方法 -> 控制锁的粒度 -> 不在这里加锁(使用最初锁外的bool进行判断)
     if(shouldSendHeartbeat) SendHeartbeat();
     if(shouldStartElection) StartElection();
+
+    // 锁外flush
+    if(shouldFlushPendingRead) FlushPendingReads();
 }
 
 void RaftNode::StartElection()
@@ -716,7 +866,8 @@ void RaftNode::BecomeFollower(int64_t newTerm)
 {
     spdlog::info("[Node {}] {} -> Follower, term: {} -> {}",
         nodeId_, RoleName(role_), currentTerm_, newTerm);          
-
+    
+    Role oldRole = role_;
     // 更新role_
     role_ = Role::Follower;
 
@@ -737,6 +888,9 @@ void RaftNode::BecomeFollower(int64_t newTerm)
     }
 
     // nextIndex_和matchIndex_等待重新成为Leader后再初始化覆盖
+
+    // Leader->Follower: 将失效的pendingRead 回调返回false
+    if(oldRole == Role::Leader) AbortPendingReads();
 }
 
 void RaftNode::BecomeCandidate()
@@ -795,6 +949,10 @@ void RaftNode::BecomeLeader()
         spdlog::debug("[Node {}] init nextIndex[{}]={}, matchIndex[{}]={}",
                     nodeId_, i, nextIndex_[i], i, matchIndex_[i]);
     }
+    
+    pendingReads_.clear();              // 防御：正常路径已清除
+    peerHeartbeatAckTimes_.assign(totalNodes_, std::chrono::steady_clock::time_point{});        // 初始化peerHeartbeatAckTimes_
+    peerHeartbeatAckTimes_[nodeId_] = std::chrono::steady_clock::time_point::max();             // 自己永远算一票
 }
 
 

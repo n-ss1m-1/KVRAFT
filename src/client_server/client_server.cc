@@ -17,6 +17,7 @@ ClientServer::ClientServer(muduo::net::EventLoop* loop,uint16_t port,const std::
     raftNode_(raftNode),
     threadPool_(threadPool)
 {
+    // 设置回调函数
     server_.setConnectionCallback(
         [this](const muduo::net::TcpConnectionPtr& conn){
             OnConnection(conn);
@@ -67,10 +68,33 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
     Command::Type type = command.type;
     if(type == Command::Type::GET)
     {
-        //GET：直接使用kvStore查询+返回结果
-        auto value = kvStore_->Get(command.key);
-        reply = value.has_value() ? value.value() : "nil";
-        spdlog::debug("[ClientServer] GET {} -> {}", command.key, reply);
+        //GET：ReadIndex共识
+        if(!raftNode_->IsLeader())      //非Leader：拒绝+客户端重定向
+        {
+            reply = "NOT_LEADER " + std::to_string(raftNode_->GetLeaderId());
+            spdlog::info("[ClientServer] GET rejected: not leader, leaderId={}", raftNode_->GetLeaderId());
+        }
+        else                            //Leader：走ReadIndex共识(心跳回复确认自己真的是Leader && readIdnex<=lastApplied_)
+        {
+            raftNode_->ReadIndex([this, conn, key=command.key]
+                (bool ok){
+                    std::string reply;
+                    if(!ok)
+                    {
+                        reply = "NOT_LEADER " + std::to_string(raftNode_->GetLeaderId()) + " or TIMEOUT";
+                    }
+                    else
+                    {
+                        auto value = kvStore_->Get(key);
+                        reply = value.has_value() ? value.value() : "nil";
+                    }
+
+                    spdlog::info("[ClientServer] GET {} -> {}", key, reply);
+                    codec_.send(conn.get(),reply);
+                });
+            //! 不在本线程发送回复：在回调中发送
+            return;
+        }
     }
     else if(type == Command::Type::PUT || type == Command::Type::DEL)
     {
@@ -78,7 +102,7 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
         if(!raftNode_->IsLeader())      //非Leader：拒绝+客户端重定向
         {
             reply = "NOT_LEADER " + std::to_string(raftNode_->GetLeaderId());
-            spdlog::debug("[ClientServer] {} rejected: not leader, leaderId={}",
+            spdlog::info("[ClientServer] {} rejected: not leader, leaderId={}",
                 ((type==Command::Type::PUT)?"PUT":"DEL"), raftNode_->GetLeaderId());
         }
         else        //Leader：需要达成共识再返回结果

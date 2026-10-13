@@ -5,6 +5,7 @@
 #include<condition_variable>
 #include<chrono>
 #include<set>
+#include<deque>
 
 
 #include "raft_log.h"
@@ -23,6 +24,9 @@ static constexpr int kHeartbeatIntervalMs_ = 50;         // 每次心跳间隔�
 class RaftNode : public std::enable_shared_from_this<RaftNode>      // 回调里要捕获 this 的弱引用，避免悬空 -> 约束： 从此 RaftNode 只能用 std::make_shared 构造，不能栈上构造。
 {
 public:
+    // ReadIndex回调
+    using ReadCallback = std::function<void(bool ok)>;
+
     RaftNode(int32_t nodeId,
              int32_t totalNodes,
              const std::shared_ptr<RaftTransport>& transport,
@@ -38,22 +42,24 @@ public:
 
     // ==================== RPC 接收（网络层调用）====================
 
-    // 处理收到的投票请求，填 reply
+    // (Follower)处理收到的投票请求，填 reply
     void HandleRequestVote(const RequestVoteArgs& args, RequestVoteReply& reply);
 
-    // 处理收到的日志复制/心跳，填 reply
+    // (Follower)处理收到的日志复制/心跳，填 reply
     void HandleAppendEntries(const AppendEntriesArgs& args, AppendEntriesReply& reply);
-
+    
+    // (Follower)处理收到的快照
     void HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSnapshotReply& reply);
 
     // ==================== RPC 回复处理 ====================
 
-    // 处理投票回复：累加票数，达到大多数则 BecomeLeader
+    // (Leader)处理投票回复：累加票数，达到大多数则 BecomeLeader
     void HandleRequestVoteReply(int32_t peerId, const RequestVoteReply& reply);
 
-    // 处理日志复制回复：更新 matchIndex/nextIndex，成功则 UpdateCommitIndex
+    // (Leader)处理日志复制回复：更新 matchIndex/nextIndex，成功则 UpdateCommitIndex   TODO(ok): UpdateCommitIndex() 放到真正更新commitIndex_的地方
     void HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply& reply);
-
+    
+    // (Leader)处理快照回复：更新 matchIndex/nextIndex  
     void HandleInstallSnapshotReply(int32_t peerId, const InstallSnapshotReply& reply);
 
     // ==================== 定时器 ====================
@@ -86,6 +92,10 @@ public:
     // 调用者必须不持有 mutex_（函数内部会加锁）
     void SendHeartbeat();       
 
+    // ReadIndex: 提交读请求
+    void ReadIndex(ReadCallback cb);
+
+
     // ==================== 查询：加锁（供 ClientServer / 测试使用）====================
 
     bool IsLeader() const;
@@ -117,8 +127,40 @@ private:
     // 向 peerId 发送 AppendEntries（内部构造 args，调 transport_）
     // entries 为空时就是心跳
     void SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args);
-
+    
+    // 发送快照(Leader -> Follower)
     void SendInstallSnapshot(int32_t peerId,const InstallSnapshotArgs& args);
+
+    // ==================== ReadIndex ==================== 
+    /*
+     调用者持锁：检查符合的pendingRead(isLeader && applied)，将他们插入readCallbacksToRun_里等待回调(GET)
+     什么时候需要调用：
+        - 可以判断：是leader(根据多数心跳回复时间) && 待读取的已提交(lastApplied_>=readIndex)  ->  调用
+            1. HandleAppendEntriesReply(): 在调用UpdateCommitIndex()后 的 锁内调用
+            2. Tick()?: 不调用Drain，但是需要取出超时pendingRead并flush
+            3. HandleInstallSnapshot(): 不需要，因为不会更新commitIndex_，也就不会更新lastApplied
+            4. ApplyCommitEntries(): 不需要，因为HandleAppendEntriesReply()最后会调用CommitEntries()->ApplyCommitEntries()，然后才调用DarinPendingReads()，在ApplyCommitEntries()里再调用是多余的
+    */
+    void DrainPendingReads();
+
+    /*
+     调用者持锁：从Leader成为Follower后，将所有pendingRead的callback插入readCallbacks_(均false)
+     BecomeFollower里检查：是从Leader->follower，才调用
+    */
+    void AbortPendingReads();
+
+    /* 
+     锁外调用该方法: 
+     - 流程：加锁 -> 将readCallbacks_全部取出 -> 解锁 -> 锁外执行callbacks
+     - 具体什么时候调用：只要往readCallbacksToRun_添加了回调，就需要调用flush
+        - HandleAppendEntriesReply(): √
+        - 调用BecomeFollower()的函数 的 锁外调用: √
+        - Tick(): √
+        - HandleInstallSnapshotReply(): 不需要
+        - ApplyCommitEntries: ApplyCommitEntries <- UpdateCommitIndex() <- HandleAppendEntries() 这是重复的 && 这是在锁内 -> 故不调用
+    */
+    void FlushPendingReads();
+
 
     // ==================== 静态配置 ====================
     int32_t nodeId_;                        // 本节点 ID
@@ -141,6 +183,19 @@ private:
     // !规定nodeId_即为nextIndex_和matchIndex_的对应下标
     std::vector<int64_t> nextIndex_;        // [i] -> 下一条要发给 peer i 的日志 index
     std::vector<int64_t> matchIndex_;       // [i] -> peer i 已确认收到的最大 index (▲收到!=提交  收到=存入内存日志+磁盘)
+
+    
+    // ==================== ReadIndex ==================== 
+    struct PendingRead
+    {
+        int64_t readIndex;
+        int64_t term;
+        std::chrono::steady_clock::time_point bornTime;
+        ReadCallback callback;
+    };
+    std::deque<PendingRead> pendingReads_;
+    std::vector<std::chrono::steady_clock::time_point> peerHeartbeatAckTimes_;          // BecomeLeader()处初始化，HanldeAppendEntriesReply()里更改
+    std::vector<std::pair<ReadCallback,bool>> readCallbacksToRun_;
 
     // ==================== 选举超时 ====================
     std::chrono::steady_clock::time_point electionResetTime_;   // follower最后一次收到心跳的时间 / Leader最后一次发出心跳的时间 / 最后一次超时启动选举的时间
