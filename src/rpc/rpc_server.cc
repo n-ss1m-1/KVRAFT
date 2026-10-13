@@ -28,6 +28,10 @@ RpcServer::RpcServer(muduo::net::EventLoop* loop,uint16_t port,RaftNode* node):
               }),
     node_(node)
 {
+    // 设置线程数量：2
+    server_.setThreadNum(2);
+
+    // 设置回调函数
     server_.setMessageCallback(
         [this](const muduo::net::TcpConnectionPtr& conn,muduo::net::Buffer* buf,muduo::Timestamp receiveTime){ 
             codec_.onMessage(conn,buf,receiveTime);        //codec 解析长度头

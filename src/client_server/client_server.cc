@@ -17,6 +17,9 @@ ClientServer::ClientServer(muduo::net::EventLoop* loop,uint16_t port,const std::
     raftNode_(raftNode),
     threadPool_(threadPool)
 {
+    // 设置线程数量：2
+    server_.setThreadNum(2);
+
     // 设置回调函数
     server_.setConnectionCallback(
         [this](const muduo::net::TcpConnectionPtr& conn){
