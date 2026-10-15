@@ -5,7 +5,10 @@ bin/
 # 日志文件
 data/*
 logs/*
-tests/test_data/*
+
+# 单元测试运行时产生的临时数据目录（CWD 为项目根）
+test_data/
+tests/test_data/
 
 # 临时文件、编辑器缓存
 *.o

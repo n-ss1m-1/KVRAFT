@@ -1,62 +1,89 @@
 //test_kv_store.cc
+// 重写版，覆盖 kv/kv_store：
+//   基础操作（Put/Get/Delete/Apply）、覆盖与删除幂等
+//   快照序列化（空表、空 value、含空格、中文、大数据、替换语义）
+//   shared_mutex 下的并发读写
 
-#include <cassert>
+#include <atomic>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "kv/kv_store.h"
 #include "common/command.h"
+#include "test_util.h"
 
 // ==================== 基础操作 ====================
 
 void TestEmpty() {
     KVStore store;
-    assert(!store.Get("anything").has_value());
-    std::cout << "[PASS] TestEmpty\n";
+    CHECK(!store.Get("anything").has_value());
 }
 
 void TestPutGet() {
     KVStore store;
     store.ApplyPut("a", "1");
-    assert(store.Get("a").value() == "1");
-    assert(!store.Get("b").has_value());
-    std::cout << "[PASS] TestPutGet\n";
+    CHECK(store.Get("a").has_value());
+    CHECK_STR_EQ(store.Get("a").value(), "1");
+    CHECK(!store.Get("b").has_value());
 }
 
 void TestOverwrite() {
     KVStore store;
     store.ApplyPut("a", "1");
     store.ApplyPut("a", "2");
-    assert(store.Get("a").value() == "2");
-    std::cout << "[PASS] TestOverwrite\n";
+    store.ApplyPut("a", "3");
+    CHECK_STR_EQ(store.Get("a").value(), "3");
+}
+
+void TestEmptyValue() {
+    KVStore store;
+    store.ApplyPut("k", "");
+    auto v = store.Get("k");
+    CHECK(v.has_value());
+    CHECK_STR_EQ(v.value(), "");
 }
 
 void TestDelete() {
     KVStore store;
     store.ApplyPut("a", "1");
-    assert(store.ApplyDelete("a"));
-    assert(!store.Get("a").has_value());
-    // 删除不存在的 key
-    assert(!store.ApplyDelete("a"));
-    std::cout << "[PASS] TestDelete\n";
+    CHECK(store.ApplyDelete("a"));
+    CHECK(!store.Get("a").has_value());
+    // 幂等：删除不存在的 key 返回 false，不崩溃
+    CHECK(!store.ApplyDelete("a"));
+    // 删了再写
+    store.ApplyPut("a", "2");
+    CHECK_STR_EQ(store.Get("a").value(), "2");
 }
 
 void TestApplyCommand() {
     KVStore store;
     store.Apply(Command{Command::Type::PUT, "x", "10"});
-    assert(store.Get("x").value() == "10");
+    CHECK_STR_EQ(store.Get("x").value(), "10");
     store.Apply(Command{Command::Type::DEL, "x", ""});
-    assert(!store.Get("x").has_value());
-    std::cout << "[PASS] TestApplyCommand\n";
+    CHECK(!store.Get("x").has_value());
+    // GET 不改变状态机
+    store.Apply(Command{Command::Type::GET, "x", ""});
+    CHECK(!store.Get("x").has_value());
+}
+
+void TestManyKeys() {
+    KVStore store;
+    for (int i = 0; i < 1000; ++i) {
+        store.ApplyPut("k" + std::to_string(i), "v" + std::to_string(i));
+    }
+    for (int i = 0; i < 1000; ++i) {
+        CHECK_STR_EQ(store.Get("k" + std::to_string(i)).value(),
+                     "v" + std::to_string(i));
+    }
 }
 
 // ==================== 序列化 ====================
 
 void TestSerializeEmpty() {
     KVStore store;
-    std::string snap = store.Serialize();
-    assert(snap.empty());
-    std::cout << "[PASS] TestSerializeEmpty\n";
+    CHECK_STR_EQ(store.Serialize(), "");
 }
 
 void TestSerializeRoundTrip() {
@@ -65,106 +92,151 @@ void TestSerializeRoundTrip() {
     store.ApplyPut("b", "2");
     store.ApplyPut("c", "3");
 
-    std::string snap = store.Serialize();
-
     KVStore restored;
-    restored.Deserialize(snap);
-
-    assert(restored.Get("a").value() == "1");
-    assert(restored.Get("b").value() == "2");
-    assert(restored.Get("c").value() == "3");
-    std::cout << "[PASS] TestSerializeRoundTrip\n";
+    restored.Deserialize(store.Serialize());
+    CHECK_STR_EQ(restored.Get("a").value(), "1");
+    CHECK_STR_EQ(restored.Get("b").value(), "2");
+    CHECK_STR_EQ(restored.Get("c").value(), "3");
 }
 
-void TestSerializeEmptyValue() {
-    // ★ 关键：空 value 必须正确处理
+void TestSerializeEmptyValueRoundTrip() {
     KVStore store;
     store.ApplyPut("empty", "");
     store.ApplyPut("after", "value");
-
-    std::string snap = store.Serialize();
     KVStore restored;
-    restored.Deserialize(snap);
-
-    assert(restored.Get("empty").has_value());
-    assert(restored.Get("empty").value() == "");
-    assert(restored.Get("after").value() == "value");   // 不能被跳过
-    std::cout << "[PASS] TestSerializeEmptyValue\n";
+    restored.Deserialize(store.Serialize());
+    CHECK(restored.Get("empty").has_value());
+    CHECK_STR_EQ(restored.Get("empty").value(), "");
+    CHECK_STR_EQ(restored.Get("after").value(), "value");
 }
 
 void TestSerializeValueWithSpace() {
-    // ★ 关键：value 含空格必须完整保留
+    // 快照格式 key\\nvalue\\n，value 允许空格
     KVStore store;
-    store.ApplyPut("key", "hello world");
-
-    std::string snap = store.Serialize();
+    store.ApplyPut("greeting", "hello world foo bar");
     KVStore restored;
-    restored.Deserialize(snap);
-
-    assert(restored.Get("key").value() == "hello world");
-    std::cout << "[PASS] TestSerializeValueWithSpace\n";
+    restored.Deserialize(store.Serialize());
+    CHECK_STR_EQ(restored.Get("greeting").value(), "hello world foo bar");
 }
 
-void TestDeserializeOverwrite() {
-    // 反序列化应该是"替换"，不是"合并"
+void TestSerializeChinese() {
     KVStore store;
-    store.ApplyPut("a", "1");
-
-    std::string snap = store.Serialize();
-
+    store.ApplyPut("名字", "你好，世界");
+    store.ApplyPut("emoji", "value");
     KVStore restored;
-    restored.ApplyPut("x", "old");   // 预先放脏数据
-    restored.Deserialize(snap);       // 应该被覆盖
-
-    assert(!restored.Get("x").has_value());
-    assert(restored.Get("a").value() == "1");
-    std::cout << "[PASS] TestDeserializeOverwrite\n";
+    restored.Deserialize(store.Serialize());
+    CHECK_STR_EQ(restored.Get("名字").value(), "你好，世界");
+    CHECK_STR_EQ(restored.Get("emoji").value(), "value");
 }
 
-void TestSerializeMultiple() {
+void TestSerializeLarge() {
     KVStore store;
-    for (int i = 0; i < 100; i++) {
+    std::string big(100000, 'x');
+    store.ApplyPut("big", big);
+    for (int i = 0; i < 500; ++i) {
         store.ApplyPut("k" + std::to_string(i), "v" + std::to_string(i));
     }
-
-    std::string snap = store.Serialize();
-
     KVStore restored;
-    restored.Deserialize(snap);
-
-    for (int i = 0; i < 100; i++) {
-        assert(restored.Get("k" + std::to_string(i)).value()
-               == "v" + std::to_string(i));
-    }
-    std::cout << "[PASS] TestSerializeMultiple\n";
+    restored.Deserialize(store.Serialize());
+    CHECK_STR_EQ(restored.Get("big").value(), big);
+    CHECK_STR_EQ(restored.Get("k499").value(), "v499");
 }
 
-// ==================== main ====================
+void TestDeserializeIsReplace() {
+    // 反序列化是"替换"而非"合并"
+    KVStore restored;
+    restored.ApplyPut("old", "x");
+    KVStore store;
+    store.ApplyPut("a", "1");
+    restored.Deserialize(store.Serialize());
+    CHECK(!restored.Get("old").has_value());
+    CHECK_STR_EQ(restored.Get("a").value(), "1");
+}
+
+void TestDeserializeEmptyClears() {
+    KVStore store;
+    store.ApplyPut("a", "1");
+    store.Deserialize("");   // 空快照 = 清空
+    CHECK(!store.Get("a").has_value());
+}
+
+// ==================== 并发 ====================
+
+void TestConcurrentWriteDistinctKeys() {
+    KVStore store;
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 200;
+    std::vector<std::thread> ths;
+    for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&store, t] {
+            for (int i = 0; i < kPerThread; ++i) {
+                std::string key = "t" + std::to_string(t)
+                                + "_" + std::to_string(i);
+                store.ApplyPut(key, std::to_string(t * 1000 + i));
+            }
+        });
+    }
+    for (auto& th : ths) th.join();
+    for (int t = 0; t < kThreads; ++t) {
+        for (int i = 0; i < kPerThread; ++i) {
+            std::string key = "t" + std::to_string(t) + "_" + std::to_string(i);
+            CHECK(store.Get(key).has_value());
+            CHECK_STR_EQ(store.Get(key).value(),
+                         std::to_string(t * 1000 + i));
+        }
+    }
+}
+
+void TestConcurrentReadWhileWrite() {
+    // 读多写少，主要验证读写锁不崩溃、不读到撕裂
+    KVStore store;
+    store.ApplyPut("hot", "initial");
+    std::atomic<bool> stop{false};
+    std::atomic<int> reads{0};
+
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t) {
+        readers.emplace_back([&] {
+            while (!stop.load()) {
+                auto v = store.Get("hot");
+                CHECK(v.has_value());
+                // 只可能是初值或两个新值之一（写操作是整串覆盖）
+                CHECK(*v == "initial" || *v == "v1" || *v == "v2");
+                reads.fetch_add(1);
+            }
+        });
+    }
+    std::thread writer([&] {
+        for (int i = 0; i < 1000; ++i) {
+            store.ApplyPut("hot", (i % 2 == 0) ? "v1" : "v2");
+        }
+    });
+    writer.join();
+    stop.store(true);
+    for (auto& r : readers) r.join();
+    CHECK(reads.load() > 0);
+}
 
 int main() {
     std::cout << "===== KVStore Tests =====\n";
 
-    TestEmpty();
-    TestPutGet();
-    TestOverwrite();
-    TestDelete();
-    TestApplyCommand();
+    RUN_TEST(TestEmpty);
+    RUN_TEST(TestPutGet);
+    RUN_TEST(TestOverwrite);
+    RUN_TEST(TestEmptyValue);
+    RUN_TEST(TestDelete);
+    RUN_TEST(TestApplyCommand);
+    RUN_TEST(TestManyKeys);
+    RUN_TEST(TestSerializeEmpty);
+    RUN_TEST(TestSerializeRoundTrip);
+    RUN_TEST(TestSerializeEmptyValueRoundTrip);
+    RUN_TEST(TestSerializeValueWithSpace);
+    RUN_TEST(TestSerializeChinese);
+    RUN_TEST(TestSerializeLarge);
+    RUN_TEST(TestDeserializeIsReplace);
+    RUN_TEST(TestDeserializeEmptyClears);
+    RUN_TEST(TestConcurrentWriteDistinctKeys);
+    RUN_TEST(TestConcurrentReadWhileWrite);
 
-    TestSerializeEmpty();
-    TestSerializeRoundTrip();
-    TestSerializeEmptyValue();
-    TestSerializeValueWithSpace();
-    TestDeserializeOverwrite();
-    TestSerializeMultiple();
-
-    std::cout << "\nAll KVStore tests passed!\n";
-    return 0;
+    TEST_SUMMARY_RETURN();
 }
-/*
-空 value（TestSerializeEmptyValue）—— 验证 getline 格式不会漏
-
-含空格的 value（TestSerializeValueWithSpace）—— 验证不会截断
-
-反序列化覆盖（TestDeserializeOverwrite）—— 验证是"替换"而非"合并"
-
-*/
