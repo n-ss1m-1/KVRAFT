@@ -71,6 +71,10 @@ bool RaftNode::Start(const Command& command)
 
         //!自己的matchIndex也更新
         matchIndex_[nodeId_] = entry.index;
+
+        //!▲ 应对单节点：无法触发HandleAppendEntriesReply()->UpdateCommitIndex()
+        // 多节点无副作用: 一张票无法构成大多数
+        UpdateCommitIndex();
     }
 
     //!锁外主动推送 而非等待Tick
@@ -137,6 +141,9 @@ void RaftNode::SendInstallSnapshot(int32_t peerId,const InstallSnapshotArgs& arg
 
 void RaftNode::DrainPendingReads()
 {
+    //! 防御: 防止follower调用，访问空的peerHeartbeatAckTimes_
+    if(role_ != Role::Leader || peerHeartbeatAckTimes_.empty()) return;
+
     // 找到可确认isLeader的最晚时间点(peerHeartbeatAckTimes_中第(n-1)/2小的时间点)
     auto v = peerHeartbeatAckTimes_;
     int k = (static_cast<int>(v.size()-1))/2;             // 节点个数->最晚有效时间的下标:  1->0  3->1  4->1  5->2  6->2
@@ -298,10 +305,11 @@ void RaftNode::ReadIndex(ReadCallback cb)
             pr.callback = std::move(cb);
 
             pendingReads_.push_back(pr);
+
+            DrainPendingReads();        //!▲ 应对单节点
+            //!▲ bugFix: 移入if中，避免follower调用，访问未初始化的peerHeartbeatAckTimes_
         }
         else notLeader = std::move(cb);
-        
-        DrainPendingReads();        //!▲ 应对单节点
     }
 
     // 锁外flush / 执行失败回调
