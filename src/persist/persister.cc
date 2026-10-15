@@ -53,26 +53,15 @@ Persister::~Persister()
 std::optional<int64_t> Persister::AppendToFile(const std::string& line)  
 {
     std::string data=line+'\n';                     // !在此处添加'\n'，与下面的同类，而非在其他地方额外处理
-    size_t remaining=data.size();
     const char* buf=data.c_str();
+    size_t len = data.size();
 
     std::lock_guard<std::mutex> lock(mutex_);
     if(fd_ < 0) return std::nullopt;
     
     int64_t startOffset = size_;        // 本次写入的起始位置
 
-    while(remaining>0)
-    {
-        ssize_t n=write(fd_,buf,remaining);
-        if(n==-1)
-        {
-            if(errno==EINTR) continue;
-            spdlog::error("[Persister] AppendToFile: write failed, errno={}: {}",errno,strerror(errno));
-            return std::nullopt;                   //通过返回值告知写入是否成功
-        }
-        remaining-=n;
-        buf+=n;                    
-    }
+    if(!WriteAllLocked(buf, len)) return std::nullopt;
 
     if(fsync(fd_)<0) 
     {
@@ -81,9 +70,46 @@ std::optional<int64_t> Persister::AppendToFile(const std::string& line)
     }
 
     //更新文件大小
-    size_ += static_cast<int64_t>(data.size());
+    size_ += static_cast<int64_t>(len);
 
     return startOffset;
+}
+
+std::optional<std::vector<int64_t>> Persister::AppendBatchToFile(const std::vector<std::string>& lines)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 空的lines || fd<0 : 直接返回空offsets
+    if(fd_ < 0 || lines.empty()) return std::vector<int64_t>{};
+
+    // 初始化offsets、curOffset
+    int64_t curOffset = size_;
+    std::vector<int64_t> offsets;
+    offsets.reserve(lines.size());              // 提前预留空间，避免频繁扩容
+    
+
+    // 循环写入文件
+    for(const auto& line : lines)
+    {
+        std::string data = line + "\n";
+        const char* buf = data.c_str();
+        size_t len = data.size();
+        if(!WriteAllLocked(buf, len)) return std::nullopt;
+        offsets.push_back(curOffset);
+        curOffset += static_cast<int64_t>(len);
+    }
+
+    // 组提交(一次)
+    if(fsync(fd_)<0) 
+    {
+        spdlog::error("[Persister] AppendBatchToFile: fsync failed, errno={}: {}",errno,strerror(errno));
+        return std::nullopt;
+    }
+
+    // 更新文件大小
+    size_ = curOffset;
+
+    return offsets;
 }
 
 /*
@@ -320,6 +346,25 @@ std::optional<std::string> Persister::ReadwholeFile() const
 bool Persister::Exists() const
 {
     return access(fileName_.c_str(),F_OK) == 0;
+}
+
+bool Persister::WriteAllLocked(const char* buf, size_t len)
+{
+    size_t remaining = len;
+    while(remaining>0)
+    {
+        ssize_t n = write(fd_,buf,remaining);
+        if(n == -1)
+        {
+            if(errno==EINTR) continue;
+            spdlog::error("[Persister] WriteAllLocked: write failed, errno={}: {}",errno,strerror(errno));
+            return false;                   //通过返回值告知写入是否成功
+        }
+        remaining -= n;
+        buf += n;                    
+    }
+
+    return true;
 }
 
 bool Persister::TruncateLocked(int64_t size)

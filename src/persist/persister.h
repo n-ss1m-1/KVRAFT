@@ -20,6 +20,9 @@ public:
     //将一条指令记录到日志 (返回起始偏移)
     std::optional<int64_t> AppendToFile(const std::string& line);
 
+    //将一组指令记录到日志 (组提交)
+    std::optional<std::vector<int64_t>> AppendBatchToFile(const std::vector<std::string>& lines);
+
     //从日志文件中读取所有指令并返回
     std::vector<std::string> LoadFromFile();
 
@@ -42,6 +45,7 @@ public:
 
 private:
     // ============= 内部辅助(需要外层调用加锁) ==============
+    bool WriteAllLocked(const char* buf, size_t len);
     bool TruncateLocked(int64_t size);
     bool ReopenLocked();
 

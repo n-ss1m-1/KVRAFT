@@ -134,14 +134,34 @@ bool RaftStorage::AppendLogEntriesFrom(int64_t startIndex,const std::vector<LogE
         }
     }
 
-    //追加新内容
-    for(const auto& entry : entries)
+    if(entries.empty()) return true;
+    // 1. 批量序列化
+    std::vector<std::string> lines;
+    lines.reserve(entries.size());
+    for(const LogEntry& entry : entries)
     {
-        if(!AppendLogEntry(entry))
-        {
-            return false;
-        }
+        lines.push_back(SerializeLogEntry(entry));
     }
+
+    // 2. 批量落盘(内部全部 write 完只 fsync 一次)
+    auto offsetsOpt = logPersister_.AppendBatchToFile(lines);
+    if(!offsetsOpt.has_value())
+    {
+        spdlog::error("[Storage] AppendLogEntriesFrom: AppendBatchToFile failed: startIndex={}, count={}",
+                startIndex, entries.size());
+            return false;
+    }
+    const std::vector<int64_t>& offsets = offsetsOpt.value();
+
+    // 3. 统一更新 indexToOffset_ 和 lastPersistedIndex_ 
+    for(size_t i=0; i<offsets.size(); i++)
+    {
+        indexToOffset_[entries[i].index] = offsets[i];
+        lastPersistedIndex_ = entries[i].index;
+    }
+
+    spdlog::trace("[Storage] AppendLogEntriesFrom: batch persisted {} entries from index={}",
+            entries.size(), startIndex);
 
     return true;
 }
