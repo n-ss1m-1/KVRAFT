@@ -32,9 +32,9 @@ RaftNode::RaftNode(int32_t nodeId,
                 log_(RaftLog()),
                 electionResetTime_(std::chrono::steady_clock::now()),
                 electionTimeoutMs_(randomTimeoutMs(150, 300)),
-                transport_(std::move(transport)),                   // 使用move传递参数，更快速
-                storage_(std::move(storage)),
-                stateMachine_(std::move(stateMachine))
+                transport_(transport),                   // 使用move传递参数，更快速  补充：NoNoNo! 此处引用+move()是无效的，值传递参数+move才是有效的
+                storage_(storage),
+                stateMachine_(stateMachine)
 {
     //仅构造函数中调用recover，保证只调用一次
     {
@@ -144,7 +144,7 @@ void RaftNode::DrainPendingReads()
     //! 防御: 防止follower调用，访问空的peerHeartbeatAckTimes_
     if(role_ != Role::Leader || peerHeartbeatAckTimes_.empty()) return;
 
-    // 找到可确认isLeader的最晚时间点(peerHeartbeatAckTimes_中第(n-1)/2小的时间点)
+    // 找到可确认isLeader的最晚时间点(peerHeartbeatAckTimes_中第(n-1)/2小的时间点)  !注: 从0开始计数
     auto v = peerHeartbeatAckTimes_;
     int k = (static_cast<int>(v.size()-1))/2;             // 节点个数->最晚有效时间的下标:  1->0  3->1  4->1  5->2  6->2
     std::nth_element(v.begin(),v.begin()+k,v.end());
@@ -189,7 +189,7 @@ void RaftNode::FlushPendingReads()
     std::vector<std::pair<ReadCallback,bool>> tmp;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        tmp.swap(readCallbacksToRun_);
+        tmp.swap(readCallbacksToRun_);                  //! 锁内swap提取任务，锁外执行任务
     }
     for(const auto& [cb,ok] : tmp)
     {
@@ -217,7 +217,7 @@ void RaftNode::SendHeartbeat()
         {
             if(peerId == nodeId_) continue;
 
-            //判断是否需要发送快照
+            //判断是否需要发送快照：需要发送的日志在Leader的快照中->直接发送快照
             if(nextIndex_[peerId] <= log_.SnapshotIndex())
             {
                 needsSnapshot[peerId] = true;
@@ -241,13 +241,15 @@ void RaftNode::SendHeartbeat()
         }
     }
 
-    //如果由peer需要快照，则加载一次
+    //如果有peer需要快照，则加载一次
     InstallSnapshotArgs snapArgs;
     bool snapshotReady = false;
     if(anyNeedSnapshot)
     {
         /* 
-         ! 锁外加载快照：tmp+rename保证原子性，可大大减小锁的粒度
+         ! 锁外加载快照：
+          - 保存快照时 -> tmp+rename保证原子性 -> 读到的快照不会是中间状态
+          - 读取快照是IO操作，应该放在锁外，可大大减小锁的粒度
          
          ! 问：为什么保存快照(TakeSnapshot)需要锁呢?
             SaveSnapshot()本身是原子性的(tmp+rename)
@@ -265,7 +267,7 @@ void RaftNode::SendHeartbeat()
             snapArgs.lastIncludedIndex = snap->lastIncludedIndex;
             snapArgs.lastIncludedTerm = snap->lastIncludedTerm;
             snapArgs.data = std::move(snap->data);
-            snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());
+            snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());      // 上面已move，不能再使用原始data计算dataLen
             snapshotReady = true;
         }
         else
@@ -504,7 +506,6 @@ void RaftNode::HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSna
         }
 
         // 5. 先将快照落盘(持久化)，失败则不动状态机/内存/日志，回报失败让Leader下轮重试
-
         if(!storage_->SaveSnapshot(Snapshot{args.lastIncludedIndex,args.lastIncludedTerm,args.data}))
         {
             spdlog::error("[Node {}] HandleInstallSnapshot: SaveSnapshot failed at index={}", 
@@ -526,6 +527,7 @@ void RaftNode::HandleInstallSnapshot(const InstallSnapshotArgs& args, InstallSna
                 nodeId_, args.lastIncludedIndex);
         }
 
+        reply.lastIncludedIndex = args.lastIncludedIndex;       // !告知Leader: 通过快照成功更新
         reply.success = true;
     }
 
@@ -625,7 +627,7 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
 
             //3. success分支
             // 规定nodeId_即为nextIndex_和matchIndex_的对应下标
-            if(reply.success)
+            if(reply.success)           // 成功
             {
                 int64_t oldMatch = matchIndex_[peerId];
                 int64_t oldCommitIndex = commitIndex_;          //! oldCommit需要在UpdateCommitIndex()前记录
@@ -648,11 +650,11 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
                     needNotify = true;
                 }
             }
-            else if(reply.conflictIndex == config::kNeedSnapshot)
+            else if(reply.conflictIndex == config::kNeedSnapshot)   // 失败：需要快照
             {
                 needSnapshot = true;
             }
-            else
+            else    // 失败 不需要快照
             {
                 int64_t oldNext = nextIndex_[peerId];
                 int64_t minAllowed = log_.SnapshotIndex() + 1;      //bug !▲易错 conflictIndex 不能小于 SnapshotIndex() + 1    避免回退到快照前(会导致死循环)
@@ -701,13 +703,15 @@ void RaftNode::HandleAppendEntriesReply(int32_t peerId, const AppendEntriesReply
                 snapArgs.data = std::move(snap->data);
                 snapArgs.dataLen = static_cast<int64_t>(snapArgs.data.size());
                 snapshotReady = true;
-                SendInstallSnapshot(peerId,snapArgs);
             }
         }
         else
         {
             spdlog::error("[Node {}] no snapshot but peers need it", nodeId_);
         }
+
+        // !锁外发送快照(RPC)
+        if(snapshotReady) SendInstallSnapshot(peerId, snapArgs);
     }
     
     // 取出pendingReadCallbacks(swap)
@@ -847,7 +851,7 @@ void RaftNode::StartElection()
         args.lastLogIndex=log_.LastIndex();
         args.lastLogTerm=log_.LastTerm();
 
-        //! 特殊情况：单节点，需要在此处检查投票是否过半，否则无法当选Leader
+        //! 特殊情况：单节点，需要在此处检查投票是否过半，否则永远无法选出Leader
         if(votesReceived_.size() > totalNodes_/2)
         {
             BecomeLeader();
@@ -1054,7 +1058,7 @@ bool RaftNode::Recover()
     if(snapshot.has_value())
     {
         // 2.1 有快照
-        stateMachine_->Deserialize(snapshot->data);         //kv状态机恢复最后快照的样子?
+        stateMachine_->Deserialize(snapshot->data);         // kv状态机恢复最后快照的样子
 
         log_.SetSnapshotIndexAndTerm(snapshot->lastIncludedIndex,snapshot->lastIncludedTerm);
 
@@ -1073,7 +1077,7 @@ bool RaftNode::Recover()
     // 快照覆盖的一定是已应用的，已应用的一定是已提交的
     lastApplied_ = commitIndex_ = snapshotIndex;            //!▲ 重启后，状态机会暂时回退，但是作为follower接收leader心跳后 -> 调用HandleAppendEntries() -> ApplyCommitedEntries() -> 逐渐恢复一致性
 
-    // 3. 加载日志
+    // 3. 从磁盘加载日志
     auto entries = storage_->LoadLogEntries(snapshotIndex);
 
     // 4. 追加到log_
