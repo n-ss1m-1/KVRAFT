@@ -2,7 +2,7 @@
 
 #include<fstream>
 #include<string.h>              //strerror
-#include <sys/sendfile.h>
+#include<sys/sendfile.h>
 #include<spdlog/spdlog.h>
 
 #include "persist/persister.h"
@@ -13,8 +13,8 @@ Persister::Persister(const std::string& fileName, bool needCreate)
     :fileName_(fileName)
 {
     fd_ = needCreate
-        ? open(fileName_.c_str(),O_RDWR|O_APPEND|O_CREAT,0644)            //▲创建需要指定权限0644，否则可能出错
-        : open(fileName_.c_str(),O_RDWR|O_APPEND,0644);                 // 用于快照，初始不需要创建空文件
+        ? open(fileName_.c_str(),O_RDWR|O_APPEND|O_CREAT,0644)            // ▲创建需要指定权限0644，否则可能出错
+        : open(fileName_.c_str(),O_RDWR|O_APPEND);                        // 用于快照，初始不需要创建空文件       注: 无O_CREAT不需要说明权限
     if(fd_==-1)
     {
         if(!needCreate && errno == ENOENT) return;      // 首次运行，尚无快照：正常 保持fd = -1
@@ -174,7 +174,7 @@ bool Persister::TruncateFront(int64_t bytesToRemove)
     
     // 2. 参数正确性检查
     if(fd_ < 0) return false;
-    if(bytesToRemove <=0) return true;
+    if(bytesToRemove <= 0) return true;
 
     // 3. 全截断: TruncateLocked
     if(bytesToRemove >= size_)
@@ -262,7 +262,7 @@ bool Persister::OverwriteFile(const std::string& content)
 
     // 2. 循环写 + fsync + close
     size_t remaining = content.size();
-    const char* p = content.data();     // const char*居然可以移动
+    const char* p = content.data();     // const char*居然可以移动: 常量指针--指针地址的值不能改，指针指向可以改
     while(remaining > 0)
     {
         ssize_t n = write(tmpFd, p, remaining);
@@ -291,7 +291,7 @@ bool Persister::OverwriteFile(const std::string& content)
     if(rename(tmpPath.c_str(), fileName_.c_str()) < 0)
     {
         spdlog::error("[Persister] OverwriteFile: rename failed, errno={}: {}", errno, strerror(errno));
-        unlink(tmpPath.c_str());    //! unlink?
+        unlink(tmpPath.c_str());    //! unlink: 删除目录项，等待无进程拿着该文件fd，直接删除该文件
         return false;
     }
     // !TODO: rename只保证原子性，不保证持久性 -> 需要fsync父目录，确保rename刷盘
@@ -312,7 +312,7 @@ std::optional<std::string> Persister::ReadwholeFile() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 重新打开文件(无O_APPEND)
+    // !重新打开文件(无需lseek处理偏移量)
     int fd = open(fileName_.c_str(), O_RDONLY | O_CLOEXEC);
     if(fd < 0) 
     {
@@ -346,25 +346,6 @@ std::optional<std::string> Persister::ReadwholeFile() const
 bool Persister::Exists() const
 {
     return access(fileName_.c_str(),F_OK) == 0;
-}
-
-bool Persister::WriteAllLocked(const char* buf, size_t len)
-{
-    size_t remaining = len;
-    while(remaining>0)
-    {
-        ssize_t n = write(fd_,buf,remaining);
-        if(n == -1)
-        {
-            if(errno==EINTR) continue;
-            spdlog::error("[Persister] WriteAllLocked: write failed, errno={}: {}",errno,strerror(errno));
-            return false;                   //通过返回值告知写入是否成功
-        }
-        remaining -= n;
-        buf += n;                    
-    }
-
-    return true;
 }
 
 bool Persister::TruncateLocked(int64_t size)
@@ -408,3 +389,21 @@ bool Persister::ReopenLocked()
     return true;
 }
 
+bool Persister::WriteAllLocked(const char* buf, size_t len)
+{
+    size_t remaining = len;
+    while(remaining>0)
+    {
+        ssize_t n = write(fd_,buf,remaining);           //! 需要使用ssize_t：若使用size_t(无符号整型) 收到-1时会变为最大值 -> 无法走到错误处理
+        if(n == -1)
+        {
+            if(errno==EINTR) continue;
+            spdlog::error("[Persister] WriteAllLocked: write failed, errno={}: {}",errno,strerror(errno));
+            return false;                   //通过返回值告知写入是否成功
+        }
+        remaining -= n;
+        buf += n;                    
+    }
+
+    return true;
+}

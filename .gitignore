@@ -29,3 +29,6 @@ question.md
 # 第三方库
 third_party/muduo/
 third_party/spdlog/
+
+# 笔记
+docs/

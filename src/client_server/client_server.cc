@@ -45,7 +45,7 @@ void ClientServer::OnMessage(const muduo::net::TcpConnectionPtr& conn,const std:
 {
     //以下任务交给线程池做：
     threadPool_->Submit(
-        [this,conn,msg](){
+        [this,conn,msg](){                  // !回调：值传递msg，否则OnMessage提交任务完成后，msg会被muduo重新利用，后续回调会使用错误msg
             HandleCommand(conn,msg);
         });
 }
@@ -95,7 +95,7 @@ void ClientServer::HandleCommand(const muduo::net::TcpConnectionPtr& conn,const 
                     spdlog::info("[ClientServer] GET {} -> {}", key, reply);
                     codec_.send(conn.get(),reply);
                 });
-            //! 不在本线程发送回复：在回调中发送
+            //! 不在本线程(线程池)发送回复：在回调中发送(即RaftNode)
             return;
         }
     }

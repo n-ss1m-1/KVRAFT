@@ -21,7 +21,7 @@ class RaftTransport;
 
 static constexpr int kHeartbeatIntervalMs_ = 50;         // 每次心跳间隔时间             static:静态类成员(所有对象共享一份值) constexpr：编译器确定值 运行时不能修改
 
-class RaftNode : public std::enable_shared_from_this<RaftNode>      // 回调里要捕获 this 的弱引用，避免悬空 -> 约束： 从此 RaftNode 只能用 std::make_shared 构造，不能栈上构造。
+class RaftNode : public std::enable_shared_from_this<RaftNode>      // 生命周期要求：RaftTransport(RpcClient)<=RaftNode -> 回调里要捕获 this 的弱引用，避免悬空 -> 约束： 从此 RaftNode 只能用 std::make_shared 构造，不能栈上构造。
 {
 public:
     // ReadIndex回调
@@ -121,14 +121,14 @@ private:
 
     // ==================== RPC 发送（Leader 主动调用）（锁外调用）====================
 
-    // 向 peerId 发送 RequestVote（内部构造 args，调 transport_）
+    // (Leader)向 peerId 发送 RequestVote（外部构造 args，调 transport_）
     void SendRequestVote(int32_t peerId,const RequestVoteArgs& args);
 
-    // 向 peerId 发送 AppendEntries（内部构造 args，调 transport_）
+    // (Leader)向 peerId 发送 AppendEntries（外部构造 args，调 transport_）
     // entries 为空时就是心跳
     void SendAppendEntries(int32_t peerId,const AppendEntriesArgs& args);
     
-    // 发送快照(Leader -> Follower)
+    // (Leader)发送快照（外部构造 args，调 transport_）
     void SendInstallSnapshot(int32_t peerId,const InstallSnapshotArgs& args);
 
     // ==================== ReadIndex ==================== 
@@ -140,6 +140,7 @@ private:
             2. Tick()?: 不调用Drain，但是需要取出超时pendingRead并flush
             3. HandleInstallSnapshot(): 不需要，因为不会更新commitIndex_，也就不会更新lastApplied
             4. ApplyCommitEntries(): 不需要，因为HandleAppendEntriesReply()最后会调用CommitEntries()->ApplyCommitEntries()，然后才调用DarinPendingReads()，在ApplyCommitEntries()里再调用是多余的
+            5. ReadIndex(): 需要，应对单节点不调用HandleAppendEntriesReply()的情况
     */
     void DrainPendingReads();
 
@@ -156,6 +157,7 @@ private:
         - HandleAppendEntriesReply(): √
         - 调用BecomeFollower()的函数 的 锁外调用: √
         - Tick(): √
+        - ReadIndex(): √
         - HandleInstallSnapshotReply(): 不需要
         - ApplyCommitEntries: ApplyCommitEntries <- UpdateCommitIndex() <- HandleAppendEntries() 这是重复的 && 这是在锁内 -> 故不调用
     */
@@ -203,7 +205,7 @@ private:
 
     // ==================== 组件依赖 ====================
     std::shared_ptr<RaftTransport> transport_;      // RPC 传输（不依赖具体网络实现）
-    std::shared_ptr<RaftStorage> storage_;          // 持久化：meta + 日志
+    std::shared_ptr<RaftStorage> storage_;          // 持久化：meta + 日志 + 快照
     std::shared_ptr<KVStore> stateMachine_;         // 状态机：KV 内存存储
 
     // ==================== 并发保护 ====================

@@ -45,9 +45,15 @@ public:
 
 private:
     // ============= 内部辅助(需要外层调用加锁) ==============
-    bool WriteAllLocked(const char* buf, size_t len);
     bool TruncateLocked(int64_t size);
     bool ReopenLocked();
+
+    /* 
+    ! 为什么仅需要实现循环写：ifstream::read()内部已实现循环读，不需要再实现
+    ! void* ：可以接收任意类型的指针，无论是int、string、struct，此处只需要接收 char*类型，同时方便指针移动
+    */
+    bool WriteAllLocked(const char* buf, size_t len);
+
 
     const std::string fileName_;
     int fd_ = -1;

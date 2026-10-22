@@ -64,7 +64,8 @@ std::optional<std::pair<int64_t,int32_t>> DeserializeMeta(const std::string& lin
     return std::make_pair(currentTerm,votedFor);                //使用方法(不需要指定模板)! std::make_pair(v1,v2); 
 }
 
-//Snapshot序列化和反序列化
+// Snapshot序列化和反序列化
+// <lastIncludedIndex> <lastIncludedTerm> <dataLen> <data>
 std::string SerializeSnapshot(const Snapshot& snap)
 {
     constexpr size_t kHeaderSize = sizeof(int64_t) * 3;

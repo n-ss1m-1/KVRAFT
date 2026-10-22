@@ -13,7 +13,7 @@
  ! 为什么是 void* ：可以接收任意类型的指针，无论是int、string、struct
 
  ! 为什么需要实现循环写：ifstream::read()内部已实现循环读，不需要再实现
-*/
+
 static bool WriteAll(int fd, const void* buf, size_t len)   
 {
     const char* p = static_cast<const char*>(buf);          // !转为 char*类型 是为了做指针运算
@@ -33,7 +33,7 @@ static bool WriteAll(int fd, const void* buf, size_t len)
 
     return true;
 }
-
+*/
 
 
 RaftStorage::RaftStorage(const std::string& dataDir):          //dataDir 由 main 创建并保证存在
@@ -223,14 +223,10 @@ std::vector<LogEntry> RaftStorage::LoadLogEntries(int64_t snapshotIndex)
         if(logPersister_.Truncate(0))
         {
             indexToOffset_.clear();
-            lastPersistedIndex_ = 0;
-            for(const auto& e : entries)
+            lastPersistedIndex_ = snapshotIndex;
+            if(!AppendLogEntriesFrom(lastPersistedIndex_+1,entries))        // 内部会重建 indexToOffset_ 和 lastPersistedIndex_
             {
-                if(!AppendLogEntry(e))      // 内部会重建 indexToOffset_ 和 lastPersistedIndex_
-                {
-                    spdlog::error("[RaftStorage] LoadLogEntries: rebuild failed at index={}", e.index);
-                    break;
-                }
+                spdlog::error("[RaftStorage] LoadLogEntries: rebuild failed");      //若无法发现错误index，可以使用逐个追加
             }
         }
         else
@@ -258,9 +254,9 @@ bool RaftStorage::SaveSnapshot(const Snapshot& snap)
 
 std::optional<Snapshot> RaftStorage::LoadSnapshot()
 {
-    if(!snapPersister_.Exists())
+    if(!HasSnapshot())
     {
-        spdlog::error("[RaftStorage] LoadSnapshot: snapshot didn't exist");
+        spdlog::info("[RaftStorage] LoadSnapshot: snapshot didn't exist");
         return std::nullopt;
     }
 
@@ -303,7 +299,7 @@ bool RaftStorage::TruncateLogUpTo(int64_t index)
         }
 
         indexToOffset_.clear();
-        lastPersistedIndex_ = index;        //!▲ bug  从未append,直接快照复制 -> index > lastPersistedIndex_ -> 此时需要修改
+        lastPersistedIndex_ = index;        //!▲ bug fixed  快照复制 -> index > lastPersistedIndex_ -> 此时lastPersistedIndex_ = 快照点 = index
         return true;
     }
 

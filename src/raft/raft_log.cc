@@ -23,7 +23,7 @@ bool RaftLog::AppendFrom(int64_t startIndex,const std::vector<LogEntry>& entries
     spdlog::info("[RaftLog] AppendFrom: startIndex={}, entries.size={}, snapshotIndex={}, LastIndex={}",
         startIndex, entries.size(), snapshotIndex_, LastIndex());
 
-    //! TODO: startIndex<FirstIndex()时，表示快照需要被覆盖，此时需要Leader发送快照
+    //! TODO: startIndex<FirstIndex()时，表示快照需要被覆盖，此时需要Leader发送快照。  // 后来的补充：此处不需要，因为会先checkConsistency()，那里会告知Leader发送快照，然后就不会调用AppendFrom()了
     // 校验startIndex的范围： 例：Size()=1时 startIndex可以是1或2
     if(startIndex<FirstIndex() || startIndex>LastIndex()+1) return false;           
     
@@ -55,14 +55,14 @@ std::optional<LogEntry> RaftLog::GetEntry(const int64_t index) const
 {
     if(index<FirstIndex() || index>LastIndex()) return std::nullopt;
 
-    return entries_[index - snapshotIndex_ - 1];           //!隐式构造optional 避免拷贝  !注意此处已经自动计算偏移
+    return entries_[IndexToArrayPos(index)];           //!隐式构造optional 避免拷贝  !注意此处已经自动计算偏移
 }
 
 std::vector<LogEntry> RaftLog::GetEntries(const int64_t startIndex,const int64_t endIndex) const
 {
     if(startIndex<FirstIndex() || startIndex>=endIndex || endIndex>LastIndex()+1) return {};                       //返回区间[start,end)
 
-    return std::vector<LogEntry>(entries_.begin()+startIndex-snapshotIndex_-1,entries_.begin()+endIndex-snapshotIndex_-1);        //!构造函数区间是左闭右开的
+    return std::vector<LogEntry>(entries_.begin()+ IndexToArrayPos(startIndex), entries_.begin()+ IndexToArrayPos(endIndex));        //!构造函数区间是左闭右开的
 }
 
 int64_t RaftLog::GetTerm(int64_t index) const
@@ -99,7 +99,7 @@ int64_t RaftLog::LastTerm() const
 bool RaftLog::TruncateFrom(int64_t index)
 {
     if(index<FirstIndex() || index>LastIndex()) return false;                    //此处调用方应该检查，若是传入错误，则什么都不做
-    entries_.erase(entries_.begin()+index-snapshotIndex_-1,entries_.end());
+    entries_.erase(entries_.begin()+IndexToArrayPos(index),entries_.end());
     return true;
 }
 
@@ -122,7 +122,7 @@ void RaftLog::SetSnapshotIndexAndTerm(int64_t index,int64_t term)
 //!注意实现逻辑
 ConsistencyCheckResult RaftLog::CheckConsistency(int64_t prevLogIndex,int64_t prevLogTerm) const
 {
-    //1. Leader日志为空，总是通过
+    //1. Leader需对比的日志为空，总是通过
     if(prevLogIndex == 0) 
     {
         return {true, 0};
@@ -158,17 +158,13 @@ ConsistencyCheckResult RaftLog::CheckConsistency(int64_t prevLogIndex,int64_t pr
     }
 
     //3.3 prevLogIndex 在内存日志里(snapshotIndex_ < prevLogIndex <= LastIndex()): 正常比较
-    auto myEntry = GetEntry(prevLogIndex);         
-    if(!myEntry.has_value()) return {false, LastIndex() + 1};    //防御: GetEntry出错  !但是此处一般不会出错，故返回一个安全值，让系统能继续允许
-
-    int64_t myTerm = myEntry.value().term;
+    int64_t myTerm = GetTerm(prevLogIndex);
     if(myTerm != prevLogTerm)
     {
         int64_t idx = prevLogIndex;
         while(idx > FirstIndex())                               //! 生成快照后 内存中第一条日志index不再是1
         {                                   
-            auto prev = GetEntry(idx - 1);                          // 防御: GetEntry出错
-            if(!prev.has_value() || prev->term !=myTerm) break;     //! 往前找相同term段的最早位置(避免Leader逐条回退)
+            if(GetTerm(idx - 1) != myTerm) break;     //! 往前找相同term段的最早位置(避免Leader逐条回退)
             idx--;
         }
         return {false,idx};

@@ -9,7 +9,7 @@
 struct ConsistencyCheckResult
 {
     bool ok = false;
-    int64_t conflictIndex = 0;
+    int64_t conflictIndex = 0;          // 告诉Leader 下次从conflictIndex开始传日志
 };
 
 class RaftLog
