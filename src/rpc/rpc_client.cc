@@ -286,7 +286,7 @@ void RpcClient::handleReply(int32_t peerId, const std::string& msg)
 
     RpcMessageType type = static_cast<RpcMessageType>(typeNum);
 
-    spdlog::trace("[RpcClient] reply from peer {}, type={},reqId={}",peerId,(type==RpcMessageType::kRequestVoteReply?"RequestVoteReply":"AppendEntriesReply"),reqId);
+    spdlog::trace("[RpcClient] reply from peer {}, type={},reqId={}",peerId,MessageTypeName(type),reqId);
     //分发消息处理
     switch (type)
     {
@@ -372,8 +372,9 @@ void RpcClient::handleReply(int32_t peerId, const std::string& msg)
             break;
         }
             
-    default:
-        break;
+        default:
+            spdlog::warn("[RpcClient] peer {}, reqId={}, unknown message type:{}",peerId,reqId,MessageTypeName(type));
+            break;
     }
 
 }

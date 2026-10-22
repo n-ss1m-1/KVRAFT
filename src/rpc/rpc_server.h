@@ -23,6 +23,6 @@ public:
 
 private:
     muduo::net::TcpServer server_;
-    LengthHeaderCodec codec_;               // 接收：读取长度头，当长度符合时调用设置好的回调函数(自动去掉长度头) | 发送：自动添加长度头 
+    LengthHeaderCodec codec_;               // 独占：值成员   |   接收：读取长度头，当长度符合时调用设置好的回调函数(自动去掉长度头) | 发送：自动添加长度头 
     RaftNode* node_;                        // 不拥有 RaftNode，生命周期由 main 保证   约束：RaftNode 必须活得比 RpcServer 长
 };

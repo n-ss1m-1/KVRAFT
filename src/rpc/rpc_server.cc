@@ -7,17 +7,6 @@
 #include "rpc/rpc_message.h"
 #include "raft/raft_node.h"
 
-static const char* MessageTypeName(RpcMessageType t) 
-{
-    switch (t) {
-        case RpcMessageType::kRequestVote: return "RequestVote";
-        case RpcMessageType::kAppendEntries: return "AppendEntries";
-        case RpcMessageType::kInstallSnapshot: return "InstallSnapshot";
-        default: return "Unknow";
-    }
-    return "Unknow";
-}
-
 
 RpcServer::RpcServer(muduo::net::EventLoop* loop,uint16_t port,RaftNode* node):
     server_(loop,muduo::net::InetAddress(port),"RpcServer"),

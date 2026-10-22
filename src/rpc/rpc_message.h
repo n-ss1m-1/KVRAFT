@@ -19,6 +19,9 @@ enum class RpcMessageType : uint32_t        //!? 显式写值——避免将来�
 };
 //解析消息类型时：使用static_cast进行类型转换 + default处理未知消息类型
 
+// RpcMessageType → const char*
+static const char* MessageTypeName(RpcMessageType t) ;
+
 
 //序列化：<消息类型> <reqId> <args/reply>
 std::string SerializeRequestVoteArgs(uint64_t reqId,const RequestVoteArgs& args);

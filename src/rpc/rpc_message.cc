@@ -4,6 +4,20 @@
 
 #include "rpc/rpc_message.h"
 
+static const char* MessageTypeName(RpcMessageType t) 
+{
+    switch (t) {
+        case RpcMessageType::kRequestVote: return "RequestVote";
+        case RpcMessageType::kAppendEntries: return "AppendEntries";
+        case RpcMessageType::kInstallSnapshot: return "InstallSnapshot";
+        case RpcMessageType::kRequestVoteReply: return "RequestVoteReply";
+        case RpcMessageType::kAppendEntriesReply: return "AppendEntriesReply";
+        case RpcMessageType::kInstallSnapshotReply: return "InstallSnapshotReply";
+        default: return "Unknow";
+    }
+    return "Unknow";
+}
+
 std::string SerializeRequestVoteArgs(uint64_t reqId,const RequestVoteArgs& args)
 {
     std::ostringstream oss;
