@@ -142,3 +142,43 @@ target_link_libraries(raft-kv PRIVATE ${MUDUO_LIBS} spdlog::spdlog_header_only)
 
 # # ==================== 全局编译选项 ====================
 # add_compile_options(-Wall -Wextra -g)
+
+# ==================== LSM engine ====================
+# 编译静态库 lsm_engine
+add_library(lsm_engine STATIC
+    src/lsm/lib/internal_key.cc
+    src/lsm/lib/skip_list.cc
+)
+
+# 告诉编译器去哪里找头文件   PUBLIC: 静态库+链接静态库的源文件都能使用   PRIVATE: 仅静态库内部能使用
+target_include_directories(lsm_engine
+    PUBLIC ${CMAKE_SOURCE_DIR}/src/lsm/include
+)
+
+# 创建测试可执行程序
+add_executable(test-lsm-internal-key
+    tests/lsm/test_internal_key.cc
+)
+
+target_include_directories(test-lsm-internal-key PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/kvraft
+)
+
+# 链接静态库: 见上文target_include_directories的作用
+target_link_libraries(test-lsm-internal-key PRIVATE lsm_engine)
+
+# Current .cc files use local header names (e.g. "skip_list.h").
+target_include_directories(lsm_engine PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/lsm/include/lsm
+)
+
+add_executable(test-lsm-skip-list tests/lsm/test_skip_list.cc)
+target_include_directories(test-lsm-skip-list PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/kvraft
+)
+target_link_libraries(test-lsm-skip-list PRIVATE lsm_engine)
+
+# 启用 CMake 的测试支持
+enable_testing()
+add_test(NAME lsm-internal-key COMMAND test-lsm-internal-key)       # NAME xxx：CTest 显示的测试名称    COMMAND xxx：要运行的可执行目标，CMake 会解析它的实际路径
+add_test(NAME lsm-skip-list COMMAND test-lsm-skip-list)
