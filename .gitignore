@@ -32,3 +32,4 @@ third_party/spdlog/
 
 # 笔记
 docs/
+build-lsm/
