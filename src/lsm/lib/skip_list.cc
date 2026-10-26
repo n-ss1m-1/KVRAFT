@@ -16,18 +16,27 @@ SkipList::Node::Node(const InternalKey& key, const std::string& value, int heigh
     next.resize(height, nullptr);
 }
 
+size_t SkipList::Node::ApproximateMemoryUsage() const noexcept
+{
+    return sizeof(Node)                         //! Node所有直接成员的 sizeof 之和 + 对齐 padding
+         + key.user_key.size()                  //! 字符串实际的字节不包含在上面 需要独立计算
+         + value.size()
+         + next.size() * sizeof(Node*)
+         + sizeof(std::unique_ptr<Node>);       // nodes_中的一个位置
+}
+
 bool SkipList::Iterator::Valid() const noexcept
 {
     return current_ != nullptr;
 }
 
-const InternalKey& SkipList::Iterator::key() const
+const InternalKey& SkipList::Iterator::Key() const
 {
     assert(Valid());            //! 承诺返回 只读引用对象，但是此处为非法迭代器，assert指定为调用方错误 -> 程序abort()
     return current_->key;
 }
 
-const std::string& SkipList::Iterator::value() const
+const std::string& SkipList::Iterator::Value() const
 {
     assert(Valid());
     return current_->value;
@@ -95,6 +104,9 @@ bool SkipList::Insert(const InternalKey& key, const std::string& value)
         predecessors[level]->next[level] = newNode;
     }
 
+    // 7. 更新估计的内存使用量
+    approximateMemoryUsage_ += newNode->ApproximateMemoryUsage();
+
     return true;
 }
 
@@ -120,6 +132,11 @@ size_t SkipList::Size() const noexcept
 bool SkipList::Empty() const noexcept
 {
     return Size()==0;            //! 排除头结点
+}
+
+size_t SkipList::ApproximateMemoryUsage() const noexcept
+{
+    return approximateMemoryUsage_;
 }
 
 // Node 定义在 SkipList 的 private 块 -> 声明方法为 SkipList::Node

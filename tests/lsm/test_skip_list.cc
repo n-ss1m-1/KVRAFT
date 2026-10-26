@@ -43,10 +43,10 @@ bool Throws(Action action) {
 
 void CheckRecord(const SkipList::Iterator& it, const Record& expected) {
     REQUIRE(it.Valid());
-    CHECK_STR_EQ(it.key().user_key, expected.key.user_key);
-    CHECK_EQ(it.key().sequence, expected.key.sequence);
-    CHECK_EQ(it.key().type, expected.key.type);
-    CHECK_STR_EQ(it.value(), expected.value);
+    CHECK_STR_EQ(it.Key().user_key, expected.key.user_key);
+    CHECK_EQ(it.Key().sequence, expected.key.sequence);
+    CHECK_EQ(it.Key().type, expected.key.type);
+    CHECK_STR_EQ(it.Value(), expected.value);
 }
 
 void CheckContents(const SkipList& list, const std::vector<Record>& expected) {
@@ -314,6 +314,59 @@ void TestEveryInsertAgainstReference() {
     }
 }
 
+
+void TestApproximateMemoryUsage() {
+    SkipList list([] { return 1; });
+    CHECK_EQ(list.ApproximateMemoryUsage(), 0u);
+
+    REQUIRE(list.Insert(Key("a", 1), "A"));
+    const size_t after_first = list.ApproximateMemoryUsage();
+    CHECK(after_first > 0u);
+
+    CHECK(!list.Insert(Key("a", 1), "replacement"));
+    CHECK_EQ(list.ApproximateMemoryUsage(), after_first);
+
+    CHECK(Throws<std::invalid_argument>([&] {
+        list.Insert(Key("bad", 0), "bad");
+    }));
+    CHECK_EQ(list.ApproximateMemoryUsage(), after_first);
+    CHECK_EQ(list.Size(), 1u);
+}
+
+void TestApproximateMemoryUsageReflectsHeight() {
+    SkipList short_list([] { return 1; });
+    SkipList tall_list([] { return SkipList::kMaxHeight; });
+
+    REQUIRE(short_list.Insert(Key("same", 1), "value"));
+    REQUIRE(tall_list.Insert(Key("same", 1), "value"));
+
+    const size_t short_usage = short_list.ApproximateMemoryUsage();
+    const size_t tall_usage = tall_list.ApproximateMemoryUsage();
+    CHECK(short_usage > 0u);
+    CHECK(tall_usage > short_usage);
+}
+
+void TestApproximateMemoryUsageUnaffectedByInvalidHeight() {
+    int height = 1;
+    SkipList list([&] { return height; });
+    REQUIRE(list.Insert(Key("kept", 1), "value"));
+    const size_t before = list.ApproximateMemoryUsage();
+
+    height = 0;
+    CHECK(Throws<std::invalid_argument>([&] {
+        list.Insert(Key("bad", 2), "value");
+    }));
+    CHECK_EQ(list.ApproximateMemoryUsage(), before);
+    CHECK_EQ(list.Size(), 1u);
+
+    height = SkipList::kMaxHeight + 1;
+    CHECK(Throws<std::invalid_argument>([&] {
+        list.Insert(Key("bad-again", 3), "value");
+    }));
+    CHECK_EQ(list.ApproximateMemoryUsage(), before);
+    CHECK_EQ(list.Size(), 1u);
+}
+
 void TestDefaultAndEmptyGenerator() {
     for (bool empty_generator : {false, true}) {
         // Both constructors should provide a working default random-height path.
@@ -349,6 +402,9 @@ int main() {
     RUN_TEST(TestIteratorsSurviveInsertions);
     RUN_TEST(TestAgainstSortedReference);
     RUN_TEST(TestEveryInsertAgainstReference);
+    RUN_TEST(TestApproximateMemoryUsage);
+    RUN_TEST(TestApproximateMemoryUsageReflectsHeight);
+    RUN_TEST(TestApproximateMemoryUsageUnaffectedByInvalidHeight);
     RUN_TEST(TestDefaultAndEmptyGenerator);
     TEST_SUMMARY_RETURN();
 }

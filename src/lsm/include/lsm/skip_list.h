@@ -22,6 +22,9 @@ private:
         std::vector<Node*> next;
 
         Node(const InternalKey& key, const std::string& value, int height);
+
+        //估算一个节点的内存占用量
+        size_t ApproximateMemoryUsage() const noexcept;
     };
 
 public:
@@ -34,8 +37,8 @@ public:
         bool Valid() const noexcept;
 
         // 调用前必须 Valid()
-        const InternalKey& key() const;
-        const std::string& value() const;
+        const InternalKey& Key() const;
+        const std::string& Value() const;
         void Next();                            // 沿next[0]移动一次
 
     private:
@@ -49,11 +52,6 @@ public:
     explicit SkipList(HeightGenerator generator);       // !用于测试：传入固定高度序列生成器
     ~SkipList() = default;
 
-    SkipList(const SkipList&) = delete;                 // 拷贝构造
-    SkipList& operator=(const SkipList&) = delete;      // 拷贝赋值
-    SkipList(SkipList&&) = delete;                      // !移动构造
-    SkipList& operator=(SkipList&&) = delete;           // !移动赋值
-
     //插入: 重复节点 -> false  其余->抛出异常
     bool Insert(const InternalKey& key, const std::string& value);
 
@@ -65,6 +63,9 @@ public:
 
     size_t Size() const noexcept;
     bool Empty() const noexcept;
+
+    // 返回当前估算的内存占用量
+    size_t ApproximateMemoryUsage() const noexcept;
 
 private:
     // !查找候选位置 + 记录前驱(Insert和Seek复用)
@@ -80,14 +81,6 @@ private:
 
     std::mt19937 random_;
     HeightGenerator heightGenerator_;
+
+    size_t approximateMemoryUsage_ = 0;
 };
-
-
-
-
-
-
-
-
-
-
