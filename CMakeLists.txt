@@ -144,41 +144,42 @@ target_link_libraries(raft-kv PRIVATE ${MUDUO_LIBS} spdlog::spdlog_header_only)
 # add_compile_options(-Wall -Wextra -g)
 
 # ==================== LSM engine ====================
-# 编译静态库 lsm_engine
+
+# 引擎静态库：所有 LSM 实现集中在这里。
 add_library(lsm_engine STATIC
     src/lsm/lib/internal_key.cc
     src/lsm/lib/skip_list.cc
+    src/lsm/lib/mem_table.cc
 )
 
-# 告诉编译器去哪里找头文件   PUBLIC: 静态库+链接静态库的源文件都能使用   PRIVATE: 仅静态库内部能使用
+# 公开头文件使用 #include "lsm/xxx.h"；实现文件暂时还使用裸文件名，
+# 因此额外保留 PRIVATE 的 src/lsm/include/lsm 搜索路径。
 target_include_directories(lsm_engine
-    PUBLIC ${CMAKE_SOURCE_DIR}/src/lsm/include
+    PUBLIC
+        ${CMAKE_SOURCE_DIR}/src/lsm/include
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lsm/include/lsm
 )
 
-# 创建测试可执行程序
-add_executable(test-lsm-internal-key
-    tests/lsm/test_internal_key.cc
-)
-
-target_include_directories(test-lsm-internal-key PRIVATE
+# 测试程序只编译测试文件，具体实现统一从 lsm_engine 静态库链接。
+set(LSM_TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/tests/kvraft
 )
 
-# 链接静态库: 见上文target_include_directories的作用
+add_executable(test-lsm-internal-key tests/lsm/test_internal_key.cc)
+target_include_directories(test-lsm-internal-key PRIVATE ${LSM_TEST_INCLUDE_DIRS})
 target_link_libraries(test-lsm-internal-key PRIVATE lsm_engine)
 
-# Current .cc files use local header names (e.g. "skip_list.h").
-target_include_directories(lsm_engine PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/lsm/include/lsm
-)
-
 add_executable(test-lsm-skip-list tests/lsm/test_skip_list.cc)
-target_include_directories(test-lsm-skip-list PRIVATE
-    ${CMAKE_SOURCE_DIR}/tests/kvraft
-)
+target_include_directories(test-lsm-skip-list PRIVATE ${LSM_TEST_INCLUDE_DIRS})
 target_link_libraries(test-lsm-skip-list PRIVATE lsm_engine)
 
-# 启用 CMake 的测试支持
+add_executable(test-lsm-mem-table tests/lsm/test_mem_table.cc)
+target_include_directories(test-lsm-mem-table PRIVATE ${LSM_TEST_INCLUDE_DIRS})
+target_link_libraries(test-lsm-mem-table PRIVATE lsm_engine)
+
+# ==================== LSM tests ====================
 enable_testing()
-add_test(NAME lsm-internal-key COMMAND test-lsm-internal-key)       # NAME xxx：CTest 显示的测试名称    COMMAND xxx：要运行的可执行目标，CMake 会解析它的实际路径
+add_test(NAME lsm-internal-key COMMAND test-lsm-internal-key)
 add_test(NAME lsm-skip-list COMMAND test-lsm-skip-list)
+add_test(NAME lsm-mem-table COMMAND test-lsm-mem-table)
