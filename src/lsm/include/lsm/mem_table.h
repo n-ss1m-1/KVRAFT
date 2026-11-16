@@ -1,23 +1,11 @@
 // mem_table.h
 #pragma once
 
-#include<string>
-#include<cstdint>
+#include <string>
+#include <cstdint>
 
 #include "skip_list.h"
-
-enum class LookupState
-{
-    kNotFound,
-    kValue,
-    kDeleted
-};
-
-struct LookupResult
-{
-    LookupState state = LookupState::kNotFound;
-    std::string value;
-};
+#include "lookup_result.h"
 
 
 class MemTable : private lsm::NonCopyable
