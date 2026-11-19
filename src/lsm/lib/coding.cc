@@ -2,8 +2,34 @@
 
 #include <stdexcept>
 #include <climits>   // UINT32_MAX
+#include <array>
 
 #include "coding.h"
+
+
+namespace 
+{
+    constexpr uint32_t kCrc32cPolynomial = 0x82F63B78u;
+
+    constexpr std::array<uint32_t, 256> MakeCrc32cTable() 
+    {
+        std::array<uint32_t, 256> table{};
+        for(uint32_t i=0; i<256; i++)
+        {
+            uint32_t x = i;             // 使用时下标i = (crc ^ byte) & 0xFF
+            for(int j=0; j<8; j++)
+            {
+                if(x&1) x = (x >> 1) ^ kCrc32cPolynomial;
+                else    x >>= 1;
+            }
+            table[i] = x;               // table[i] = Step8(Low8)
+        }
+
+        return table;
+    }
+
+    constexpr auto kCrc32cTable = MakeCrc32cTable();
+}
 
 
 void lsm::AppendFixed32(std::string& out, uint32_t value) 
@@ -54,27 +80,39 @@ uint64_t lsm::DecodeFixed64(const char* data)
     return value;
 }
 
-// !注意实现思路   TODO: 查表优化?
+// !注意实现思路
+// uint32_t lsm::Crc32c(std::string_view bytes) 
+// {
+//     uint32_t crc = 0xFFFFFFFFu;                     // 中间结果 初始化为 0xFFFFFFFFu
+//     for(char c : bytes)
+//     {
+//         crc ^= static_cast<unsigned char>(c);       // c先转成unsigned char 再与中间结果异或 (!避免有符号char)
+//         for(int bit=0; bit<8; bit++)                // (每处理1字节 循环8次)中间结果最低位为1：先右移一位 再异或0x82F63B78u   中间结果最低位为0：仅右移一位  
+//         {
+//             if(crc & 1)                     // !注意:不能精简，先移位再判断(×)-先判断再移位(√) 结果不同
+//             {
+//                 crc >>= 1;
+//                 crc ^= 0x82F63B78u;
+//             }
+//             else
+//             {
+//                 crc >>= 1;
+//             }
+//         }
+//     }
+//     return ~crc;            // 最后按位取反
+// }
+
+// 查表优化版
 uint32_t lsm::Crc32c(std::string_view bytes) 
 {
-    uint32_t crc = 0xFFFFFFFFu;                     // 中间结果 初始化为 0xFFFFFFFFu
-    for(char c : bytes)
+    uint32_t crc = 0xFFFFFFFFu;
+    for(char ch : bytes)
     {
-        crc ^= static_cast<unsigned char>(c);       // c先转成unsigned char 再与中间结果异或 (!避免有符号char)
-        for(int bit=0; bit<8; bit++)                // (每处理1字节 循环8次)中间结果最低位为1：先右移一位 再异或0x82F63B78u   中间结果最低位为0：仅右移一位  
-        {
-            if(crc & 1)                     // !注意:不能精简，先移位再判断(×)-先判断再移位(√) 结果不同
-            {
-                crc >>= 1;
-                crc ^= 0x82F63B78u;
-            }
-            else
-            {
-                crc >>= 1;
-            }
-        }
+        uint32_t x = crc ^ static_cast<unsigned char>(ch);
+        crc = (x >> 8) ^ (kCrc32cTable[x & 0xFFu]);
     }
-    return ~crc;            // 最后按位取反
+    return ~crc;            // ! 最后取反
 }
 
 size_t lsm::EncodedInternalKeySize(const InternalKey& key)
