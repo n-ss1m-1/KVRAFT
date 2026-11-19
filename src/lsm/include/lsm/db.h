@@ -19,11 +19,13 @@
 class MemTable;
 class WalWriter;
 class SSTableReader;
+class BlockCache;
 
 struct DBOptions
 {
     bool enableWal = true;
     size_t memTableSizeLimit = 4 * 1024 * 1024;
+    size_t BlockCacheCapacity = 8 * 1024 * 1024;       // 0 表示不使用 BlockCache
 };
 
 class DB : private lsm::NonCopyable
@@ -143,6 +145,7 @@ private:
     MemTableState active_;
     std::optional<MemTableState> immutable_;
     std::unique_ptr<WalWriter> walWriter_;          // !可选延迟构造 在不需要wal时不构造
+    std::shared_ptr<BlockCache> blockCache_;
 
     uint64_t lastSequence_ = 0;                     // 编号分配进度，恢复时结合MANIFEST与WAL确定
     uint64_t publishedSequence_ = 0;                // 已对查询可见的最大sequence；未开启WAL时不含持久化承诺

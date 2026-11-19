@@ -16,6 +16,8 @@
 #include "mem_table.h"
 #include "wal.h"
 #include "sstable.h"
+#include "block_cache.h"
+
 
 DB::DB(const std::string& directory, const DBOptions& options)
     : options_(options),
@@ -29,10 +31,13 @@ DB::DB(const std::string& directory, const DBOptions& options)
     // 2. 创建MemTable (否则为空指针 无法使用)
     active_.table = std::make_shared<MemTable>();   // .walNumbers在Recover()中确认开启WAL后再恢复
 
-    // 3. Recover() + 依据是否开启WAL->创建WAL相应成员
+    // 3. 创建BlockCache
+    blockCache_ = std::make_shared<BlockCache>(options.BlockCacheCapacity);
+
+    // 4. Recover() + 依据是否开启WAL->创建WAL相应成员
     Recover();             //! 先创建walWriter在第一次会创建一个空的日志文件 -> 混淆 创建新库 和 恢复旧库 
     
-    // 4. 启动后台线程
+    // 5. 启动后台线程
     backgoundThread_ = std::thread([this]{
         this->BackgoundLoop();
     });
@@ -225,7 +230,7 @@ void DB::Recover()
             // ! 先检查SSTable实际大小与meta记录的大小是否匹配 再进行恢复
             std::string path = TablePath(meta.fileNumber);
             if(std::filesystem::file_size(path) != meta.fileSize) throw std::runtime_error("DB::Recover: SSTable file size mismatch");
-            tables_.push_back(std::make_unique<SSTableReader>(path));
+            tables_.push_back(std::make_unique<SSTableReader>(path, meta.fileNumber, blockCache_));
         }
 
         lastSequence_ = manifest_.LastSequence();
@@ -686,7 +691,7 @@ void DB::FlushImmutable(const MemTableState& state)
     meta.largest = std::move(largestKey);
 
     // 准备新SSTableReader
-    std::unique_ptr<SSTableReader> reader = LSM_TIME(ReaderInit, std::make_unique<SSTableReader>(sstablePath));
+    std::unique_ptr<SSTableReader> reader = LSM_TIME(ReaderInit, std::make_unique<SSTableReader>(sstablePath, fileNumber, blockCache_));
 
     // 2. 锁内发布
     {
@@ -712,7 +717,7 @@ void DB::FlushImmutable(const MemTableState& state)
         manifest_ = std::move(tmpManifest);    
         
         // 通知前台Flush()
-        immutable_.reset();
+        immutable_.reset();                     // ! state复制的是 shared_ptr 和 walNumbers: 此处不会释放immutable_ 而是在FlushImmutable()结束时再释放
 #ifdef LSM_DIAGNOSTICS
         diagnosticTask.release();
 #endif

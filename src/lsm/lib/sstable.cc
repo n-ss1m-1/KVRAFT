@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <stdexcept>
 #include <system_error>
+#include <new>          // std::bad_alloc
 
 #include "sstable.h"
 #include "diagnostics.h"
@@ -173,9 +174,13 @@ void SSTableBuilder::FinishCurrentBlock()
     currentBlock_.Reset();
 }
 
-
-
 SSTableReader::SSTableReader(const std::string& path)
+    : SSTableReader(path, 0, nullptr)   //! 不重复实现 将单参数构造委托给三参数构造
+{}
+
+SSTableReader::SSTableReader(const std::string& path, uint64_t fileNumber, std::shared_ptr<BlockCache> blockCache)
+    : fileNumber_(fileNumber),
+      blockCache_(std::move(blockCache))
 {
     // 1. 打开文件 初始化fd_
     fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -244,12 +249,10 @@ LookupResult SSTableReader::Get(uint64_t readSequence, std::string_view userKey)
 #ifdef LSM_DIAGNOSTICS
         ++diagnosticQuery.blocks;
 #endif
-        lsm_diag::count(lsm_diag::Blocks);
-        lsm_diag::count(lsm_diag::Bytes, idx.size + 4);
-        auto rawBlock = ReadBlock(idx.offset, idx.size);
-        DataBlockReader blockReader = LSM_TIME(Validate, DataBlockReader(std::move(rawBlock)));
+        std::shared_ptr<const DataBlockReader> blockReader = LoadDataBlock(idx.offset, idx.size);
+
         // 5.1 找到kValue or kDeletion -> 立刻返回
-        result = LSM_TIME(BlockGet, blockReader.Get(readSequence, userKey));
+        result = LSM_TIME(BlockGet, blockReader->Get(readSequence, userKey));
         if(result.state != LookupState::kNotFound) return result;
 
         /*
@@ -289,6 +292,39 @@ std::string SSTableReader::ReadBlock(uint64_t offset, uint64_t size) const
     // 5. 返回不含 CRC 的 block 内容
     return content;
 }
+
+std::shared_ptr<const DataBlockReader> SSTableReader::LoadDataBlock(uint64_t offset, uint64_t size) const
+{
+    // 查询块缓存
+    BlockCacheKey cacheKey{fileNumber_, offset};
+    std::shared_ptr<const DataBlockReader> reader = nullptr;
+    if(blockCache_) reader = blockCache_->Get(cacheKey);            // ! 有缓存才尝试从缓存读取
+
+    // 未命中：ReadBlock -> 构造并验证DataBlockReader -> 插入缓存
+    if(reader == nullptr)
+    {
+        // 只统计实际加载；缓存命中不重复读取、CRC 和构造验证。
+        lsm_diag::count(lsm_diag::Blocks);
+        lsm_diag::count(lsm_diag::Bytes, size + 4);
+        std::string rawBlock = ReadBlock(offset, size);
+        reader = LSM_TIME(Validate, std::make_shared<const DataBlockReader>(std::move(rawBlock)));
+        if(blockCache_)             // ! 有缓存才插入缓存
+        {
+            try
+            {
+                blockCache_->Insert(cacheKey, reader, size);
+            }
+            catch (const std::bad_alloc&)
+            {
+                // 缓存分配失败：仍使用当前已验证的 reader 完成查询
+            }
+        }
+    }
+    
+    // 命中：直接返回
+    return reader;
+}
+
 
 /*
 [magic: 8]            

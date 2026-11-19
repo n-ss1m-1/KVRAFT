@@ -9,6 +9,7 @@
 #include "internal_key.h"
 #include "data_block.h"
 #include "bloom_filter.h"
+#include "block_cache.h"
 #include "coding.h"
 #include "noncopyable.h"
 
@@ -87,7 +88,9 @@ public:
      系统调用失败抛 std::system_error
      文件格式或校验和错误抛 std::runtime_error
     */
+    
     explicit SSTableReader(const std::string& path);
+    SSTableReader(const std::string& path, uint64_t fileNumber, std::shared_ptr<BlockCache> blockCache);
     ~SSTableReader();
     
     // 按照 readSequence 查找 userKey 的可见版本记录
@@ -101,6 +104,7 @@ private:
      - 返回值只包含块内存，不包含 CRC
     */
     std::string ReadBlock(uint64_t offset, uint64_t size) const;
+    std::shared_ptr<const DataBlockReader> LoadDataBlock(uint64_t offset, uint64_t size) const;
 
     void LoadFooter();
     void LoadIndex();
@@ -116,6 +120,7 @@ private:
 
 private:
     int fd_ = -1;
+    uint64_t fileNumber_ = 0;            // db中SSTable的文件编号
     uint64_t fileSize_ = 0;             // fstat获取 用于定位末尾Footer
 
     // 读取Footer   Footer是否需要封装为一个struct呢?
@@ -126,6 +131,7 @@ private:
 
     std::unique_ptr<BloomFilter> bloomFilter_;      // ! 打开文件后才能知道构造参数 -> unique_ptr延后构造
     std::vector<BlockIndexEntry> index_;
+    std::shared_ptr<BlockCache> blockCache_;
 };
 
 

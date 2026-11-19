@@ -159,6 +159,7 @@ add_library(lsm_engine STATIC
     src/lsm/lib/sstable.cc
     src/lsm/lib/db.cc
     src/lsm/lib/manifest.cc
+    src/lsm/lib/block_cache.cc
 )
 
 target_link_libraries(lsm_engine PUBLIC Threads::Threads)
@@ -239,8 +240,16 @@ target_include_directories(test-lsm-sstable-writer PRIVATE ${LSM_TEST_INCLUDE_DI
 target_link_libraries(test-lsm-sstable-writer PRIVATE lsm_engine)
 target_link_options(test-lsm-sstable-writer PRIVATE "-Wl,--wrap=write" "-Wl,--wrap=fsync")
 
+# 缓存测试包装 pread，验证命中绕过文件读取及未命中错误传播。
+add_executable(test-lsm-block-cache tests/lsm/test_block_cache.cc)
+target_include_directories(test-lsm-block-cache PRIVATE ${LSM_TEST_INCLUDE_DIRS})
+target_link_libraries(test-lsm-block-cache PRIVATE lsm_engine)
+target_link_options(test-lsm-block-cache PRIVATE "-Wl,--wrap=pread")
+
 # ==================== LSM tests ====================
 enable_testing()
+add_test(NAME lsm-block-cache COMMAND test-lsm-block-cache)
+set_tests_properties(lsm-block-cache PROPERTIES TIMEOUT 30)
 add_test(NAME lsm-manifest COMMAND test-lsm-manifest)
 set_tests_properties(lsm-manifest PROPERTIES TIMEOUT 20)
 add_test(NAME lsm-db COMMAND test-lsm-db)
