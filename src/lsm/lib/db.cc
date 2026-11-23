@@ -17,6 +17,7 @@
 #include "wal.h"
 #include "sstable.h"
 #include "block_cache.h"
+#include "write_batch.h"
 
 
 DB::DB(const std::string& directory, const DBOptions& options)
@@ -25,6 +26,12 @@ DB::DB(const std::string& directory, const DBOptions& options)
       manifestPath_((std::filesystem::path(directory) / "MANIFEST").string()),
       walPath_((std::filesystem::path(directory) / "wal.log").string())        // 自动判断是否有 `/`
 {
+    // 0. 检查 option 是否合法
+    if(options_.memTableSizeLimit == 0) throw std::invalid_argument("DB: memTableSizeLimit must be greater than 0");
+    if(options_.maxGroupRequests == 0) throw std::invalid_argument("DB: maxGroupRequests must be greater than 0");
+    if(options_.maxGroupBytes == 0) throw std::invalid_argument("DB: maxGroupBytes must be greater than 0");
+
+
     // 1. 确认/创建目录  !当目录存在时create_directories()不会做任何事
     std::filesystem::create_directories(directory);                 // 区别于xxdirectory 一个是创建指定目录 一个是递归创建目录
 
@@ -32,7 +39,7 @@ DB::DB(const std::string& directory, const DBOptions& options)
     active_.table = std::make_shared<MemTable>();   // .walNumbers在Recover()中确认开启WAL后再恢复
 
     // 3. 创建BlockCache
-    blockCache_ = std::make_shared<BlockCache>(options.BlockCacheCapacity);
+    blockCache_ = std::make_shared<BlockCache>(options.blockCacheCapacity);
 
     // 4. Recover() + 依据是否开启WAL->创建WAL相应成员
     Recover();             //! 先创建walWriter在第一次会创建一个空的日志文件 -> 混淆 创建新库 和 恢复旧库 
@@ -63,22 +70,19 @@ DB::~DB()
 void DB::Put(std::string_view key, std::string_view value) 
 {
     LSM_SCOPE(Api);
-    lsm::Entry entry;
-    entry.key.type = ValueType::kValue;
-    entry.key.user_key = key;
-    entry.value = value;
+    WriteBatch batch;
+    batch.Put(key, value);
 
-    Write(std::move(entry));        // ! 后续不再使用 将占有权交给Write() -> Write()使用值成员接收更好(引用则是表示二者共用该变量)
+    Write(batch);        //entry: ! 后续不再使用 将占有权交给Write() -> Write()使用值成员接收更好(引用则是表示二者共用该变量)
 }
 
 void DB::Delete(std::string_view key) 
 {
     LSM_SCOPE(Api);
-    lsm::Entry entry;
-    entry.key.type = ValueType::kDeletion;
-    entry.key.user_key = key;
+    WriteBatch batch;
+    batch.Delete(key);
 
-    Write(std::move(entry));
+    Write(batch);
 }
 
 std::optional<std::string> DB::Get(std::string_view key) const 
@@ -140,83 +144,6 @@ void DB::Flush()
     }
 }
 
-void DB::Write(lsm::Entry entry) 
-{
-    LSM_LOCK_START(diag_first);
-    std::unique_lock<std::mutex> lock(dbMutex_);
-    LSM_LOCK_END(diag_first, FirstLock);
-    CheckHealthLocked();
-    
-    // 1. 检查 active非空(避免阈值=0持续切换空表) && active达到阈值
-    while(!active_.table->Empty() && active_.table->ApproximateMemoryUsage() >= options_.memTableSizeLimit)
-    {
-        // 如果immutable存在 -> 等待刷盘完成，然后需要再次 CheckHealth + check阈值(!因为等待期间其他前台线程可能又更换了active)
-        if(immutable_)
-        {
-            LSM_TIME(Backpressure, backgroundCv_.wait(lock, [&](){
-                return  !immutable_ || 
-                        failed_ || backgroundError_ || shuttingDown_;
-            }));
-            CheckHealthLocked();
-            continue;
-        }
-        else  // imuutable不存在 -> 直接切换
-        {
-            RotateMemTableLocked();    // ! 内部会notify_all() 此处不需要重复唤醒后台线程
-        }
-    }
-
-    // 2. 分配sequence + 检查entry是否合法
-    if(lastSequence_ == std::numeric_limits<uint64_t>::max()) throw std::overflow_error("DB::Write: sequence exhausted");
-    entry.key.sequence = lastSequence_ + 1;
-    lsm::EncodedEntrySize(entry);           // 检查entry参数是否合法
-
-    // 3. !开启WAL时：预写日志+刷盘
-    if(options_.enableWal)
-    {
-        // !怎么处理error_code：ec非空 -> 标记failed + 抛系统异常
-        std::error_code ec = LSM_TIME(Append, walWriter_->Append(entry));
-        if(ec)
-        {
-            failed_ = true;
-            backgroundCv_.notify_all();
-            throw std::system_error(ec, "DB::Write: WAL append failed");
-        }
-        ec = LSM_TIME(Sync, walWriter_->Sync());
-        if(ec)
-        {
-            failed_ = true;
-            backgroundCv_.notify_all();
-            throw std::system_error(ec, "DB::Write: WAL sync failed");
-        }
-    }
-
-    // 4. 写入 MemTable
-    // ! 先写入memTable 再发布sequence：避免发布的sequence读不到
-    // ! 此处也需要捕获Add抛出的异常，设置failed_状态，因为插入异常后暂不保证容器可继续使用
-    try 
-    {
-        if(!LSM_TIME(Add, active_.table->Add(entry.key.sequence, entry.key.type, entry.key.user_key, entry.value)))  // TODO1
-        {
-            failed_ = true;
-            backgroundCv_.notify_all();
-            throw std::runtime_error("DB::Write: MemTable insert failed");
-        } 
-    } 
-    catch (...) 
-    {
-        failed_ = true;
-        backgroundCv_.notify_all();
-        throw;
-    }
-    
-
-    // 5. 统一发布sequence
-    lastSequence_++;
-    publishedSequence_ = entry.key.sequence;       
-
-}
-
 void DB::Recover() 
 {
     // ! 仅当manifest文件存在时才需要LoadManifest，否则会产生错误(区分首次启动与再次启动)
@@ -258,25 +185,30 @@ void DB::Recover()
             std::string walPath = WalPath(walNumber);
             WalReader walReader(walPath);
 
+            std::vector<lsm::Entry> entries;
             lsm::Entry entry;
             WalReadStatus status;
-            while(WalReadStatus::kRecord == (status = walReader.ReadNext(entry)))
+            while(WalReadStatus::kRecord == (status = walReader.ReadNext(entries)))
             {
-                // ! 检查sequence是否严格递增
-                uint64_t sequence = entry.key.sequence;
-                if(sequence <= previousSequence) throw std::runtime_error("DB::Recover: WAL sequence out of order");
-                previousSequence = sequence;
-
-                lastSequence_ = std::max(lastSequence_, sequence);      // 保证lastSequence_是最新的 max->不能倒退
-
-                if(sequence <= manifest_.FlushedSequence()) continue;        // !针对上面(previousSequence)的异常情况：如果该日志已持久化到SSTable 则不需要重复插入MenTable
-
-                // TODO1
-                if(!active_.table->Add(sequence, entry.key.type, entry.key.user_key, entry.value))            
+                for(const auto& entry : entries)
                 {
-                    throw std::runtime_error("DB::Recover: MemTable insert failed");
+                    // ! 检查sequence是否严格递增
+                    uint64_t sequence = entry.key.sequence;
+                    if(sequence <= previousSequence) throw std::runtime_error("DB::Recover: WAL sequence out of order");
+                    previousSequence = sequence;
+
+                    lastSequence_ = std::max(lastSequence_, sequence);      // 保证lastSequence_是最新的 max->不能倒退
+
+                    if(sequence <= manifest_.FlushedSequence()) continue;        // !针对上面(previousSequence)的异常情况：如果该日志已持久化到SSTable 则不需要重复插入MenTable
+
+                    // TODO1
+                    if(!active_.table->Add(sequence, entry.key.type, entry.key.user_key, entry.value))
+                    {
+                        throw std::runtime_error("DB::Recover: MemTable insert failed");
+                    }
+                    // ! 此处与Write()中的Add()抛异常的处理方式不同：Write()后续db还会被使用，故需要设置failed；此处直接将异常传出，db构造失败，由外部处理异常
                 }
-                // ! 此处与Write()中的Add()抛异常的处理方式不同：Write()后续db还会被使用，故需要设置failed；此处直接将异常传出，db构造失败，由外部处理异常
+
             }
             
             // 处理其他错误相关的WalReadStatus   !不设置failed_也没关系 因为直接抛异常 db构造也不会完成 failed状态后续也不会再使用
@@ -430,42 +362,6 @@ void DB::SyncDirectory() const
     }
     if(close(dirFd) < 0) throw std::system_error(errno, std::generic_category(), "DB::SyncDirectory: close parent dir failed");
 }
-
-// void DB::ResetWal() 
-// {
-//     // 打开 wal.log.tmp 临时文件
-//     std::string tmpPath = walPath_ + ".tmp";
-//     int tmpFd = open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-//     if(tmpFd < 0) throw std::system_error(errno, std::generic_category(), "DB::ResetWal: open wal.log.tmp failed");
-
-//     // fsync -> close -> rename
-//     try 
-//     {
-//         while(fsync(tmpFd) < 0)
-//         {
-//             if(errno == EINTR) continue;
-//             throw std::system_error(errno, std::generic_category(), "DB::ResetWal: fsync tmpFd failed");
-//         }
-
-//         int result = close(tmpFd);
-//         tmpFd = -1;
-//         if(result < 0) throw std::system_error(errno, std::generic_category(), "DB::ResetWal: close tmpFd failed");
-
-//         if(rename(tmpPath.c_str(), walPath_.c_str()) < 0) throw std::system_error(errno, std::generic_category(), "DB::ResetWal: rename system call failed");
-//     } 
-//     catch(...) 
-//     {
-//         if(tmpFd >= 0) close(tmpFd);     // 不能重复关闭相同fd
-//         unlink(tmpPath.c_str());      // 删除临时文件  
-//         throw;
-//     }
-
-//     // 刷新父目录
-//     SyncDirectory();
-
-//     // 重新打开walWriter
-//     walWriter_ = std::make_unique<WalWriter>(walPath_);
-// }
 
 void DB::CheckHealthLocked() const 
 {
@@ -747,5 +643,194 @@ void DB::FlushImmutable(const MemTableState& state)
     // WAL清理异常在本函数内记录，不影响已完成的持久化。
 }
 
+void DB::Write(WriteBatch& batch)
+{
+    // 入队前先预留空间，避免pending插入后分配内存失败，导致数据残留的不一致
+    std::vector<PendingWrite*> group;
+    group.reserve(options_.maxGroupRequests);
 
+    // 1. 在栈上创建 PendingWrite
+    PendingWrite pending;
+    pending.batch = &batch;
+    pending.estimatedBytes = batch.EstimatedWalRecordSize();
 
+    // 2. 获取队列锁，将节点加入队尾
+    std::unique_lock<std::mutex> writeQueueLock(writeQueueMutex_);
+    writeQueue_.push_back(&pending);
+
+    // 3. 等待：自己已完成 || 自己成为队首
+    // ! 不检查error，避免请求提前返回、销毁pending，导致后续组长访问悬空指针
+    pending.cv.wait(writeQueueLock, [&,this](){
+        return pending.done || writeQueue_.front() == &pending;
+    });
+
+    // 3.1 已完成：组员检查是否出错(向外抛出)
+    if(pending.done)
+    {
+        if(pending.error) std::rethrow_exception(pending.error);
+        return;         // 无异常：返回
+    }
+
+    // 3.2.1 成为组长: 选定本组候选请求(WriteGroup()内校验是否合法)
+    size_t groupBytes = 0;
+    for(auto request : writeQueue_)
+    {
+        if(group.size() >= options_.maxGroupRequests) break;       // ! 设置数量上限
+
+        // 先插入首个请求，然后限制写入字节预算
+        const size_t requestBytes = request->estimatedBytes;
+        if(!group.empty() &&
+           (groupBytes >= options_.maxGroupBytes ||                        // ! 第一个条件 避免：首个请求允许超过预算，之后计算如果只用第二个条件，则右边的减法会下溢回绕(->max)，导致之后该检查无效
+            requestBytes > options_.maxGroupBytes - groupBytes)) break;
+        group.push_back(request);
+        groupBytes += requestBytes;
+    }
+
+    // 3.2.2 释放队列锁：WriteGroup期间可新增PendingWrite到队列中
+    writeQueueLock.unlock();
+
+    // 3.2.3 WriteGroup(): 校验 + 实际执行组提交
+    // ! group 部分在执行期间由组长独占处理 -> 不需要加 writeQueueMutex_ 锁
+    std::exception_ptr groupError;
+    try
+    {
+        WriteGroup(group);
+    }
+    catch(...)
+    {
+        // ! 此处只需要保存异常，然后继续执行下面的队列收尾，不能重复抛出
+        // 避免其他线程会一直等待该组从队列移除，但是一直等不到
+        groupError = std::current_exception();
+    }
+
+    // 3.2.4 再次加锁(使用writeQueue_?)
+    writeQueueLock.lock();
+
+    // 通知本组 batch 检查结果
+    for(size_t i=0; i<group.size(); i++)
+    {
+        if(!group[i]->error && groupError) group[i]->error = groupError;
+        writeQueue_.pop_front();
+        group[i]->done = true;
+        group[i]->cv.notify_one();         // ! 锁内唤醒是为了避免：解锁后组员提前苏醒取得锁 -> 发现done=true -> 提前返回、销毁pending -> 组长悬空访问pending
+    }
+    if(!writeQueue_.empty()) writeQueue_.front()->cv.notify_one();      // ! 通知新组长交接
+
+    // ! 组长也需要报告错误
+    if(pending.error) std::rethrow_exception(pending.error);
+    //writeQueueLock.unlock();      // 自动析构解锁
+}
+
+// ! group 部分在执行期间由组长独占处理 -> 不需要加 writeQueueMutex_ 锁
+void DB::WriteGroup(const std::vector<PendingWrite*>& group)
+{
+    LSM_LOCK_START(diag_first);
+    std::unique_lock<std::mutex> lock(dbMutex_);
+    LSM_LOCK_END(diag_first, FirstLock);
+    CheckHealthLocked();
+
+    // 1. 检查 active非空(避免阈值=0持续切换空表) && active达到阈值
+    while(!active_.table->Empty() && active_.table->ApproximateMemoryUsage() >= options_.memTableSizeLimit)
+    {
+        // 如果immutable存在 -> 等待刷盘完成，然后需要再次 CheckHealth + check阈值(!因为等待期间其他前台线程可能又更换了active)
+        if(immutable_)
+        {
+            LSM_TIME(Backpressure, backgroundCv_.wait(lock, [&](){
+                return  !immutable_ ||
+                        failed_ || backgroundError_ || shuttingDown_;
+            }));
+            CheckHealthLocked();
+            continue;
+        }
+        else  // imuutable不存在 -> 直接切换
+        {
+            RotateMemTableLocked();    // ! 内部会notify_all() 此处不需要重复唤醒后台线程
+        }
+    }
+
+    // 2. 检查batch是否合法 + 检查sequence容量 + 分配sequence
+    uint64_t lastPlannedSequence = lastSequence_;
+    for(auto p : group)
+    {
+        try
+        {
+            WriteBatch& batch = *(p->batch);
+            if(batch.Empty()) throw std::invalid_argument("DB::Write: empty batch");
+            if(batch.Count() > std::numeric_limits<uint64_t>::max() - lastPlannedSequence) throw std::overflow_error("DB::Write: sequence exhausted");
+            for(size_t i=0; i< batch.Count(); i++)
+            {
+                lsm::Entry& entry = batch.operations_[i];
+                entry.key.sequence = lastPlannedSequence + i + 1;
+            }
+            // !同时检查批次和entry是否合法，相比原来在循环中lsm::EncodeEntrySize()更严谨
+            // !这里检查是为了避免：关闭WAL -> 不执行walWriter_->Append -> 未检查 -> Memtable写入非法或超大批次
+            lsm::EncodeBatchPayloadSize(batch.operations_);
+
+            lastPlannedSequence += batch.Count();           // 逐batch推进预计的lastSequence (! 如果上面抛出错误 则不会推进游标)
+        }
+        catch(...)
+        {
+            // ! batch检查出错：不认为DB故障 -> 不把异常向外抛出
+            // 保存该batch的错误
+            p->error = std::current_exception();
+        }
+    }
+    if(lastPlannedSequence == lastSequence_) return;        // 没有合法的 batch 直接返回即可
+
+    // ! 处理抛出的异常：walWriter_->Append、walWriter_->Sync、active_.table->Add
+    try
+    {
+        // 3. !开启WAL时：预写日志+刷盘
+        if(options_.enableWal)
+        {
+            // !怎么处理error_code：ec非空 -> 标记failed + 抛系统异常
+            std::error_code ec;
+            for(auto p : group)
+            {
+                if(p->error) continue;                      // ! 如果上面检查发现 batch 格式错误，则跳过写入流程
+                auto& batch = *(p->batch);
+                ec = LSM_TIME(Append, walWriter_->Append(batch.operations_));
+                if(ec)
+                {
+                    failed_ = true;
+                    backgroundCv_.notify_all();
+                    throw std::system_error(ec, "DB::Write: WAL append failed");
+                }
+            }
+            ec = LSM_TIME(Sync, walWriter_->Sync());
+            if(ec)
+            {
+                failed_ = true;
+                backgroundCv_.notify_all();
+                throw std::system_error(ec, "DB::Write: WAL sync failed");
+            }
+        }
+
+        // 4. 写入 MemTable
+        // ! 先写入memTable 再发布sequence：避免发布的sequence读不到
+        // ! 此处也需要捕获Add抛出的异常，设置failed_状态，因为插入异常后暂不保证容器可继续使用
+        for(auto p : group)
+        {
+            if(p->error) continue;                      // ! 如果上面检查发现 batch 格式错误，则跳过写入流程
+            auto& batch = *(p->batch);
+            for(const auto& entry : batch.operations_)
+            {
+                if(!LSM_TIME(Add, active_.table->Add(entry.key.sequence, entry.key.type, entry.key.user_key, entry.value)))  // TODO1
+                {
+                    failed_ = true;
+                    backgroundCv_.notify_all();
+                    throw std::runtime_error("DB::Write: MemTable insert failed");
+                }
+            }
+        }
+    }
+    catch(...)
+    {
+        failed_ = true;
+        backgroundCv_.notify_all();
+        throw;
+    }
+
+    // 5. 统一发布sequence
+    publishedSequence_ = lastSequence_ = lastPlannedSequence;
+}

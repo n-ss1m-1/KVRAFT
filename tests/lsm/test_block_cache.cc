@@ -130,7 +130,7 @@ void TestCorruptionNotCached() {
 }
 void TestDbVersionsAndReopen() {
     for(size_t capacity:{size_t{0},size_t{1},size_t{4096}}){
-        Fixture f;DBOptions options;options.BlockCacheCapacity=capacity;options.enableWal=false;
+        Fixture f;DBOptions options;options.blockCacheCapacity=capacity;options.enableWal=false;
         {
             DB db(f.dir,options);db.Put("apple","red");db.Flush();
             CHECK_STR_EQ(db.Get("apple").value_or("missing"),"red"); // 预热旧表

@@ -183,15 +183,15 @@ void TestWalOverlapAndOrphans() {
         CHECK_EQ(m.Tables().back().fileNumber,10u);
     }
 }
-void TestDisabledWalAndZeroThreshold() {
+void TestWalModesAndSmallThreshold() {
     for(bool enable:{false,true}) {
         Fixture f;
         {
-            DB db(f.dir,DBOptions{enable,0});
+            DB db(f.dir,DBOptions{enable,1});
             db.Put("apple","red"); db.Delete("apple"); db.Put("banana","");
             db.Flush(); CHECK(!db.Get("apple")); Value(db,"banana","");
         }
-        {DB db(f.dir,DBOptions{enable,0}); CHECK(!db.Get("apple")); Value(db,"banana","");}
+        {DB db(f.dir,DBOptions{enable,1}); CHECK(!db.Get("apple")); Value(db,"banana","");}
         CHECK_EQ(WalCount(f)>0,enable);
     }
 }
@@ -306,7 +306,7 @@ int main(){
     RUN_TEST(TestTruncatedSegments);
     RUN_TEST(TestCorruptionAndOrdering);
     RUN_TEST(TestWalOverlapAndOrphans);
-    RUN_TEST(TestDisabledWalAndZeroThreshold);
+    RUN_TEST(TestWalModesAndSmallThreshold);
     RUN_TEST(TestForegroundAndBackpressure);
     RUN_TEST(TestExplicitFlushWaits);
     RUN_TEST(TestBackgroundFailureWakesWaiters);

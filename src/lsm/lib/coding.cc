@@ -193,11 +193,39 @@ bool lsm::DecodeEntry(std::string_view input, Entry& entry)
     if(input.size() - keySize < 4) return false;
     const uint32_t valueLength = DecodeFixed32(input.data() + keySize);
 
-    if(valueLength != input.size() - keySize - 4) return false;
+    if(valueLength != input.size() - keySize - sizeof(valueLength)) return false;
     if(decoded.key.type == ValueType::kDeletion && valueLength != 0) return false;
-    decoded.value = input.substr(keySize + 4, valueLength);
+    decoded.value = input.substr(keySize + sizeof(valueLength), valueLength);
 
     entry = std::move(decoded);
     
+    return true;
+}
+
+bool lsm::DecodeEntryPrefix(std::string_view input, Entry& entry, size_t& bytesRead)
+{
+    Entry decoded;
+
+    //! keySize = sizeof(sequence) + sizeof(type) + sizeof(key_len) + key_len
+    size_t keySize = 0;
+    if(!DecodeInternalKey(input, decoded.key, keySize)) return false;
+
+    // valueLength
+    if(input.size() - keySize < 4) return false;
+    const uint32_t valueLength = DecodeFixed32(input.data() + keySize);
+
+    if(valueLength > input.size() - keySize - sizeof(valueLength)) return false;    //! 区别：不必相等 不足才报错
+
+    // entrySize: 只检查当前单条记录的长度合法性 后续的记录不检查
+    if(keySize > kWalMaxEntrySize - sizeof(valueLength) || valueLength > kWalMaxEntrySize - sizeof(valueLength) - keySize) return false;
+    const size_t entrySize = keySize + sizeof(valueLength) + valueLength;
+    if(entrySize > kWalMaxEntrySize) return false;
+
+    if(decoded.key.type == ValueType::kDeletion && valueLength != 0) return false;
+    decoded.value = input.substr(keySize + sizeof(valueLength), valueLength);
+
+    entry = std::move(decoded);
+    bytesRead = entrySize;
+
     return true;
 }

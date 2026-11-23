@@ -2,6 +2,7 @@
 #pragma once
 
 #include <vector>
+#include <deque>
 #include <string>
 #include <string_view>
 #include <cstdint>
@@ -20,12 +21,15 @@ class MemTable;
 class WalWriter;
 class SSTableReader;
 class BlockCache;
+class WriteBatch;
 
 struct DBOptions
 {
     bool enableWal = true;
-    size_t memTableSizeLimit = 4 * 1024 * 1024;
-    size_t BlockCacheCapacity = 8 * 1024 * 1024;       // 0 表示不使用 BlockCache
+    size_t memTableSizeLimit = 4 * 1024 * 1024;         // 禁用 0
+    size_t blockCacheCapacity = 8 * 1024 * 1024;        // 0 表示不使用 BlockCache
+    size_t maxGroupRequests = 32;                      // 禁用 0
+    size_t maxGroupBytes = 1024 * 1024;                // 每组预计 WAL 编码字节的最大预算
 };
 
 class DB : private lsm::NonCopyable
@@ -46,6 +50,11 @@ public:
     void Put(std::string_view key, std::string_view value);
     void Delete(std::string_view key);
 
+    // 同步提交非空批次；入队后由组长合并请求、执行并通知结果，异常不代表已回滚
+    // 整批统一可见；开启WAL时同组共享Sync，关闭WAL时需Flush保证持久化
+    // 内部修改sequence但不清空batch；调用期间不得并发修改或重复提交同一batch
+    void Write(WriteBatch& batch);
+
     /*
      全程持锁，依据 publishedSequence_ 进行查找
      查找顺序：active->immutable(若存在)->SSTable
@@ -53,9 +62,9 @@ public:
     */
     std::optional<std::string> Get(std::string_view key) const;
 
-    // 等待：调用Flush()时已发布的全部写入被SSTable和MANIFEST可靠保存。
-    // active为空但immutable仍含目标数据时，仍需等待。
-    // 后台失败或关闭时抛异常；不等待旧WAL清理成功。
+    // 等待：调用Flush()时已发布的全部写入被SSTable和MANIFEST可靠保存
+    // active为空但immutable仍含目标数据时，仍需等待
+    // 后台失败或关闭时抛异常；不等待旧WAL清理成功
     void Flush();
 
 private:
@@ -69,20 +78,23 @@ private:
         std::vector<uint64_t> walNumbers;       // (分段式WAL)应对恢复时一个MemTable对应多个wal文件的情况 方便分批次清理wal文件
     };
 
-    // Put/Delete的共同入口，全程持dbMutex_，条件变量等待期间释放锁。
-    // 写入前检查阈值：必要时等待immutable完成，再切换active和WAL。
-    // 分配sequence、校验Entry、Append/Sync WAL、插入active，最后发布sequence。
-    // 写入故障时设置failed_并通知等待者。
-    void Write(lsm::Entry entry);
+    struct PendingWrite
+    {
+        WriteBatch* batch;              // 借用调用方的批次，Write()返回前有效
+        size_t estimatedBytes = 0;      // 该 pending 写入 WAL 预计的字节预算
+        bool done = false;              // 请求是否处理完成，成功或失败均为true
+        std::exception_ptr error;       // 写入失败的错误原因
+        std::condition_variable cv;     // 检查：done / 成为队首
+    };
     
-    // 在线程启动前恢复MANIFEST和有效SSTable，并初始化文件编号。
-    // 开启WAL时按段号重放日志，跳过已刷盘记录，仅允许修复最新段残缺尾部。
-    // 创建新的写入段，登记active的全部来源WAL，最后恢复publishedSequence_。
+    // 在线程启动前恢复MANIFEST和有效SSTable，并初始化文件编号
+    // 开启WAL时按段号重放日志，跳过已刷盘记录，仅允许修复最新段残缺尾部
+    // 创建新的写入段，登记active的全部来源WAL，最后恢复publishedSequence_
     void Recover();
 
-    // 内部加锁检查健康状态；已持dbMutex_时不能调用。
+    // 内部加锁检查健康状态；已持dbMutex_时不能调用
     void CheckHealth() const;
-    // 调用者已持dbMutex_；重新抛出后台异常，或报告故障、关闭状态。
+    // 调用者已持dbMutex_；重新抛出后台异常，或报告故障、关闭状态
     void CheckHealthLocked() const;
 
     // 扫描正式和临时SSTable文件名，确认下一个可用编号
@@ -92,9 +104,8 @@ private:
     std::string TablePath(uint64_t fileNumber) const;
     std::string WalPath(uint64_t walNumber) const;          // 分段式wal文件
 
-
-    // 持久化数据库目录项变更，用于新WAL创建和旧WAL删除。
-    // SSTableWriter和Manifest::Save已自行同步目录，无需重复调用。
+    // 持久化数据库目录项变更，用于新WAL创建和旧WAL删除
+    // SSTableWriter和Manifest::Save已自行同步目录，无需重复调用
     void SyncDirectory() const;
 
     // 将WAL原子替换为空文件，同步目录并重新打开WalWriter
@@ -117,18 +128,21 @@ private:
     // 捕获异常、保存错误并通知前台 异常不能逃出线程入口，否则会触发std::terminate
     void BackgoundLoop();
 
-
-    // 调用者已持dbMutex_，且DB健康、active非空、immutable不存在。
-    // 先准备新MemTable和WAL，再冻结并移交旧active，最后通知后台。
-    // 由Write或公共Flush调用；内部不等待刷盘。
+    // 调用者已持dbMutex_，且DB健康、active非空、immutable不存在
+    // 先准备新MemTable和WAL，再冻结并移交旧active，最后通知后台
+    // 由Write或公共Flush调用；内部不等待刷盘
     void RotateMemTableLocked();
 
     // 实际执行后台任务：锁外构建SSTable并持久化，锁内发布manifest_、tables_
     void FlushImmutable(const MemTableState& state);
 
+    // 调用者不持队列锁或DB锁；内部持DB锁检查健康、处理背压、校验batch(非db故障)、预分配sequence
+    // 开启WAL时逐批Append、共享一次Sync，写入MemTable后统一发布sequence
+    // WAL或MemTable写入阶段出错则标记DB故障并抛异常；队列收尾和完成通知由Write负责
+    void WriteGroup(const std::vector<PendingWrite*>& group);
+
+
 private:
-
-
     DBOptions options_;
     std::string directory_;
     std::string manifestPath_;
@@ -138,6 +152,9 @@ private:
     std::condition_variable backgroundCv_;
     std::thread backgoundThread_;
     std::exception_ptr backgroundError_;
+
+    std::mutex writeQueueMutex_;
+    std::deque<PendingWrite*> writeQueue_;                  // group commit
     
     Manifest manifest_;
     std::vector<std::unique_ptr<SSTableReader>> tables_;    // 与manifest.Tables()一一对应，按刷盘顺序从旧到新保存 -> Get()反向遍历 优先查询最新表
@@ -165,6 +182,9 @@ TODO：
     - WAL 写了一部分后失败：截断到本次写入前的位置，恢复成功后继续服务
     - WAL Sync 失败：首版进入故障状态，重启恢复
     - WAL 已 Sync，MemTable 插入失败：优先考虑补写 MemTable，而不是撤销 WAL
+
+4. 研究option的上限在不同情况下的最佳配置
+5. 组提交：研究主动攒组等待是否值得
 
 */
 

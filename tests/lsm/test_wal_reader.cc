@@ -24,13 +24,17 @@ void CheckRecord(const lsm::Entry& r, uint64_t seq) {
     CHECK_STR_EQ(r.key.user_key, expected.key.user_key);
     CHECK_STR_EQ(r.value, expected.value);
 }
+void CheckRecord(const std::vector<lsm::Entry>& records, uint64_t seq) {
+    REQUIRE(records.size() == 1);
+    CheckRecord(records.front(), seq);
+}
 void TestEmptyAndMissing() {
     const auto dir = testutil::MakeTempDir("wal_empty");
     const auto path = dir + "/wal";
     Save(path, "");
     {
         WalReader reader(path);
-        auto output = MakeRecord(999);
+        std::vector<lsm::Entry> output{MakeRecord(999)};
         CHECK_EQ(reader.LastValidOffset(), 0u);
         CHECK_EQ(reader.ReadNext(output), WalReadStatus::kEndOfFile);
         CheckRecord(output, 999);
@@ -53,14 +57,14 @@ void TestRecords() {
     Save(path, a + b);
     {
         WalReader reader(path);
-        lsm::Entry output;
+        std::vector<lsm::Entry> output;
         if (reader.ReadNext(output) == WalReadStatus::kRecord) {
             CheckRecord(output, 1);
             CHECK_EQ(reader.LastValidOffset(), a.size());
             if (reader.ReadNext(output) == WalReadStatus::kRecord) {
-                CHECK_EQ(output.key.sequence, 2u);
-                CHECK_EQ(output.key.type, ValueType::kDeletion);
-                CHECK(output.value.empty());
+                CHECK_EQ(output.at(0).key.sequence, 2u);
+                CHECK_EQ(output.at(0).key.type, ValueType::kDeletion);
+                CHECK(output.at(0).value.empty());
                 CHECK_EQ(reader.LastValidOffset(), a.size() + b.size());
                 CHECK_EQ(reader.ReadNext(output), WalReadStatus::kEndOfFile);
             } else { CHECK(false); }
@@ -77,7 +81,7 @@ void TestTruncatedTails() {
         Save(path, b.substr(0, n));
         {
             WalReader reader(path);
-            auto output = MakeRecord(999);
+            std::vector<lsm::Entry> output{MakeRecord(999)};
             CHECK_EQ(reader.ReadNext(output), n == 0 ?
                 WalReadStatus::kEndOfFile : WalReadStatus::kTruncatedTail);
             CHECK_EQ(reader.LastValidOffset(), 0u);
@@ -86,7 +90,7 @@ void TestTruncatedTails() {
         Save(path, a + b.substr(0, n));
         {
             WalReader reader(path);
-            lsm::Entry output;
+            std::vector<lsm::Entry> output;
             if (reader.ReadNext(output) != WalReadStatus::kRecord) {
                 CHECK(false);
                 continue;
@@ -124,7 +128,7 @@ void TestCorruption() {
         Save(path, bytes);
         {
             WalReader reader(path);
-            auto output = MakeRecord(999);
+            std::vector<lsm::Entry> output{MakeRecord(999)};
             CHECK_EQ(reader.ReadNext(output), WalReadStatus::kCorruption);
             CHECK_EQ(reader.LastValidOffset(), 0u);
             CheckRecord(output, 999);

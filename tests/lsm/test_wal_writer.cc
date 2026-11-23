@@ -89,10 +89,10 @@ void TestCreateAppendSyncReopen() {
     CHECK_STR_EQ(Bytes(f.path), waltest::Frame(Record(1)) +
         waltest::Frame(Record(2, true)) + waltest::Frame(Record(3)));
     WalReader reader(f.path);
-    lsm::Entry out;
+    std::vector<lsm::Entry> out;
     for (uint64_t seq = 1; seq <= 3; ++seq) {
         REQUIRE(reader.ReadNext(out) == WalReadStatus::kRecord);
-        CheckRecord(out, Record(seq, seq == 2));
+        CheckRecord(out.at(0), Record(seq, seq == 2));
     }
     CHECK_EQ(reader.ReadNext(out), WalReadStatus::kEndOfFile);
     CHECK_EQ(reader.LastValidOffset(), std::filesystem::file_size(f.path));
@@ -144,11 +144,11 @@ void TestWriteFailureLeavesPartialTail() {
     const auto firstSize = waltest::Frame(Record(1)).size();
     CHECK_EQ(std::filesystem::file_size(f.path), firstSize + 5);
     WalReader reader(f.path);
-    lsm::Entry out;
+    std::vector<lsm::Entry> out;
     REQUIRE(reader.ReadNext(out) == WalReadStatus::kRecord);
     CHECK_EQ(reader.ReadNext(out), WalReadStatus::kTruncatedTail);
     CHECK_EQ(reader.LastValidOffset(), firstSize);
-    CheckRecord(out, Record(1));
+    CheckRecord(out.at(0), Record(1));
 }
 void TestZeroWrite() {
     Fixture f;

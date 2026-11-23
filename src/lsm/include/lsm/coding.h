@@ -31,7 +31,6 @@ namespace lsm
     uint32_t Crc32c(std::string_view bytes);        // string_view借用
 
 
-
     /* 
     二进制布局：
         - InternalKey：[sequence：8 B][type：1 B][key_len：4 B][user_key]
@@ -57,4 +56,7 @@ namespace lsm
     std::string EncodeEntry(const Entry& entry);
     bool DecodeEntry(std::string_view input, Entry& entry);     // string_view借用
 
+    // 批量解析专用
+    // 一批WAL的格式(taggedLength首位1 旧版为0)： [taggedLength: 4 B][CRC32C: 4 B][count: 4 B][entry][entry][entry]...
+    bool DecodeEntryPrefix(std::string_view input, Entry& entry, size_t& bytesRead);
 } // namespace lsm

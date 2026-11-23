@@ -4,6 +4,7 @@
 #include <fcntl.h>          // open、O_RDONLY、O_CLOEXEC
 #include <string>
 #include <string_view>
+#include <vector>
 #include <cstdint>
 #include <cerrno>           // errno、EINTR
 #include <system_error>     // std::error_code
@@ -11,6 +12,23 @@
 #include "coding.h"
 #include "noncopyable.h"
 
+namespace lsm
+{
+    constexpr uint32_t kWalHeaderSize = 8;
+    constexpr uint32_t kWalMinBatchPayloadSize = 4 + lsm::kWalMinEntrySize;  // count + 至少一条entry
+    constexpr uint32_t kWalMaxBatchPayloadSize = 16 * 1024 * 1024;
+    constexpr uint32_t kWalBatchFlag = uint32_t{1} << 31;
+
+    enum class WalRecordKind
+    {
+        kSingle,            // 单条：长度最高位 0
+        kBatch              // 批量：长度最高位 1
+    };
+
+    // ! 检查：批次非空、条数可编码、sequence 连续且不溢出、每条 Entry 合法、总 payload 不超长度限制
+    // 返回 [count][entries...] 的编码长度
+    size_t EncodeBatchPayloadSize(const std::vector<lsm::Entry>& entries);
+};
 
 enum class WalReadStatus
 {
@@ -27,7 +45,8 @@ public:
     explicit WalReader(const std::string& path);
     ~WalReader();
 
-    WalReadStatus ReadNext(lsm::Entry& record);
+    // 读取一条完整 WAL 记录：单条格式返回一项，批次格式返回整批
+    WalReadStatus ReadNext(std::vector<lsm::Entry>& entries);
     uint64_t LastValidOffset() const noexcept;
 
 private:
@@ -68,9 +87,12 @@ public:
     文件操作失败：返回对应系统错误。
     成功：返回空 error_code。
     */
-    std::error_code Append(const lsm::Entry& record);
+    std::error_code Append(const lsm::Entry& entry);
+    std::error_code Append(const std::vector<lsm::Entry>& entries);
     std::error_code Sync();
 
+private:
+    std::error_code WriteRecord(std::string_view encoded);
 private:
     int fd_ = -1;
 };

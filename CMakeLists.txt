@@ -160,6 +160,7 @@ add_library(lsm_engine STATIC
     src/lsm/lib/db.cc
     src/lsm/lib/manifest.cc
     src/lsm/lib/block_cache.cc
+    src/lsm/lib/write_batch.cc
 )
 
 target_link_libraries(lsm_engine PUBLIC Threads::Threads)
@@ -246,8 +247,24 @@ target_include_directories(test-lsm-block-cache PRIVATE ${LSM_TEST_INCLUDE_DIRS}
 target_link_libraries(test-lsm-block-cache PRIVATE lsm_engine)
 target_link_options(test-lsm-block-cache PRIVATE "-Wl,--wrap=pread")
 
+# 批次测试只在测试程序中注入 WAL 短读写及同步失败。
+add_executable(test-lsm-write-batch tests/lsm/test_write_batch.cc)
+target_include_directories(test-lsm-write-batch PRIVATE ${LSM_TEST_INCLUDE_DIRS})
+target_link_libraries(test-lsm-write-batch PRIVATE lsm_engine)
+target_link_options(test-lsm-write-batch PRIVATE "-Wl,--wrap=write" "-Wl,--wrap=read" "-Wl,--wrap=fsync")
+
+# 组提交测试仅在测试进程内控制入队时序及 WAL 故障。
+add_executable(test-lsm-group-commit tests/lsm/test_group_commit.cc)
+target_include_directories(test-lsm-group-commit PRIVATE ${LSM_TEST_INCLUDE_DIRS})
+target_link_libraries(test-lsm-group-commit PRIVATE lsm_engine)
+target_link_options(test-lsm-group-commit PRIVATE "-Wl,--wrap=write" "-Wl,--wrap=fsync" "-Wl,--wrap=pthread_mutex_lock")
+
 # ==================== LSM tests ====================
 enable_testing()
+add_test(NAME lsm-group-commit COMMAND test-lsm-group-commit)
+set_tests_properties(lsm-group-commit PROPERTIES TIMEOUT 60)
+add_test(NAME lsm-write-batch COMMAND test-lsm-write-batch)
+set_tests_properties(lsm-write-batch PROPERTIES TIMEOUT 60)
 add_test(NAME lsm-block-cache COMMAND test-lsm-block-cache)
 set_tests_properties(lsm-block-cache PROPERTIES TIMEOUT 30)
 add_test(NAME lsm-manifest COMMAND test-lsm-manifest)
