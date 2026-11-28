@@ -1,1 +1,4 @@
-results/*/databases/
+# Raw results, databases, source snapshots and experiment build products are local archives.
+/results/
+__pycache__/
+*.pyc
