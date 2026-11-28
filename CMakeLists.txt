@@ -161,6 +161,7 @@ add_library(lsm_engine STATIC
     src/lsm/lib/manifest.cc
     src/lsm/lib/block_cache.cc
     src/lsm/lib/write_batch.cc
+    src/lsm/lib/compaction.cc
 )
 
 target_link_libraries(lsm_engine PUBLIC Threads::Threads)
@@ -259,8 +260,25 @@ target_include_directories(test-lsm-group-commit PRIVATE ${LSM_TEST_INCLUDE_DIRS
 target_link_libraries(test-lsm-group-commit PRIVATE lsm_engine)
 target_link_options(test-lsm-group-commit PRIVATE "-Wl,--wrap=write" "-Wl,--wrap=fsync" "-Wl,--wrap=pthread_mutex_lock")
 
+# 归并测试仅在测试进程内注入数据块读取失败。
+add_executable(test-lsm-compaction tests/lsm/test_compaction.cc)
+target_include_directories(test-lsm-compaction PRIVATE ${LSM_TEST_INCLUDE_DIRS})
+target_link_libraries(test-lsm-compaction PRIVATE lsm_engine)
+target_link_options(test-lsm-compaction PRIVATE "-Wl,--wrap=pread")
+
+# Compaction 调度验收通过测试包装控制任务领取和清理时序。
+add_executable(test-lsm-db-compaction tests/lsm/test_db_compaction.cc)
+target_include_directories(test-lsm-db-compaction PRIVATE ${LSM_TEST_INCLUDE_DIRS})
+target_link_libraries(test-lsm-db-compaction PRIVATE lsm_engine)
+target_link_options(test-lsm-db-compaction PRIVATE "-Wl,--wrap=write" "-Wl,--wrap=unlink" "-Wl,--wrap=rename"
+    "-Wl,--wrap=fsync" "-Wl,--wrap=_ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE")
+
 # ==================== LSM tests ====================
 enable_testing()
+add_test(NAME lsm-db-compaction COMMAND test-lsm-db-compaction)
+set_tests_properties(lsm-db-compaction PROPERTIES TIMEOUT 30)
+add_test(NAME lsm-compaction COMMAND test-lsm-compaction)
+set_tests_properties(lsm-compaction PROPERTIES TIMEOUT 30)
 add_test(NAME lsm-group-commit COMMAND test-lsm-group-commit)
 set_tests_properties(lsm-group-commit PROPERTIES TIMEOUT 60)
 add_test(NAME lsm-write-batch COMMAND test-lsm-write-batch)

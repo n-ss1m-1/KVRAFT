@@ -300,8 +300,141 @@ void TestMalformedMetadata() {
     ExpectThrows<std::runtime_error>([&] { SSTableReader reader(fixture.path); });
 }
 
+
+// 对照全部记录，覆盖块内推进、跨块版本、删除标记和二进制内容。
+void TestIteratorTraversal() {
+    const std::vector<lsm::Entry> entries = {
+        E("", 40, ""), E("apple", 30, "new"),
+        E("apple", 20, "", ValueType::kDeletion), E("apple", 10, "old"),
+        E(std::string("b\0x", 3), 9, std::string("v\0x", 3)),
+        E("cherry", 8, std::string(9000, 'x')), E("zebra", 7, "last")
+    };
+    for (size_t target : {size_t{1}, size_t{80}, size_t{65536}}) {
+        Fixture fixture;
+        SSTableBuilder builder(entries.size(), target);
+        for (const auto& entry : entries) builder.Add(entry);
+        builder.Finish();
+        SSTableWriter::Write(fixture.path, builder);
+        SSTableReader reader(fixture.path);
+        auto it = reader.Begin();
+        auto independent = reader.Begin();
+        for (const auto& entry : entries) {
+            REQUIRE(it.Valid());
+            CHECK_STR_EQ(it.Key().user_key, entry.key.user_key);
+            CHECK_EQ(it.Key().sequence, entry.key.sequence);
+            CHECK_EQ(it.Key().type, entry.key.type);
+            CHECK_STR_EQ(it.Value(), entry.value);
+            it.Next();
+        }
+        CHECK(!it.Valid());
+        CHECK(!it.Valid());
+        REQUIRE(independent.Valid());
+        CHECK_STR_EQ(independent.Key().user_key, "");
+        auto restarted = reader.Begin();
+        REQUIRE(restarted.Valid());
+        CHECK_EQ(restarted.Key().sequence, uint64_t{40});
+    }
+    Fixture fixture;
+    SSTableBuilder empty(0);
+    empty.Finish();
+    SSTableWriter::Write(fixture.path, empty);
+    SSTableReader reader(fixture.path);
+    CHECK(!reader.Begin().Valid());
+}
+
+void TestIteratorCacheEviction() {
+    Fixture fixture;
+    SSTableBuilder builder(3, 64);
+    builder.Add(E("apple", 30, "new"));
+    builder.Add(E("apple", 20, "old"));
+    builder.Add(E("banana", 10, "yellow"));
+    builder.Finish();
+    REQUIRE(builder.BlockCount() == 2);
+    SSTableWriter::Write(fixture.path, builder);
+    auto cache = std::make_shared<BlockCache>(128);
+    SSTableReader reader(fixture.path, 77, cache);
+    auto it = reader.Begin();
+    REQUIRE(it.Valid());
+    REQUIRE(cache->Get({77, builder.Index()[0].offset}) != nullptr);
+    // 填满缓存，确认当前块已被淘汰，迭代器仍可在块内推进。
+    auto other = std::make_shared<const DataBlockReader>(lsm::EncodeEntry(E("other", 1, "v")));
+    cache->Insert({99, 0}, other, 128);
+    CHECK(cache->Get({77, builder.Index()[0].offset}) == nullptr);
+    readMode = ReadMode::kIoError;
+    it.Next();
+    REQUIRE(it.Valid());
+    CHECK_EQ(it.Key().sequence, uint64_t{20});
+    readMode = ReadMode::kNormal;
+    it.Next();
+    REQUIRE(it.Valid());
+    CHECK_STR_EQ(it.Key().user_key, "banana");
+    it.Next();
+    CHECK(!it.Valid());
+}
+
+void TestIteratorReadErrors() {
+    Fixture fixture;
+    SSTableBuilder builder(2, 1);
+    builder.Add(E("apple", 20, "first"));
+    builder.Add(E("banana", 10, "second"));
+    builder.Finish();
+    SSTableWriter::Write(fixture.path, builder);
+    const auto original = Load(fixture.path);
+    const auto second = builder.Index()[1];
+    {
+        SSTableReader reader(fixture.path);
+        readMode = ReadMode::kIoError;
+        ExpectThrows<std::system_error>([&] { reader.Begin(); });
+        readMode = ReadMode::kNormal;
+        auto it = reader.Begin();
+        readMode = ReadMode::kIoError;
+        ExpectThrows<std::system_error>([&] { it.Next(); });
+        CHECK(!it.Valid());
+        readMode = ReadMode::kNormal;
+    }
+    {
+        SSTableReader reader(fixture.path);
+        auto it = reader.Begin();
+        readMode = ReadMode::kEof;
+        ExpectThrows<std::runtime_error>([&] { it.Next(); });
+        CHECK(!it.Valid());
+        readMode = ReadMode::kNormal;
+    }
+    // 下一块 CRC 损坏，以及 CRC 正确但记录格式损坏，都不能伪装成遍历结束。
+    for (bool fixCrc : {false, true}) {
+        auto bytes = original;
+        bytes[second.offset + 8] = char(0x7f); // 非法 ValueType
+        if (fixCrc) {
+            std::string crc;
+            lsm::AppendFixed32(crc, lsm::Crc32c(std::string_view(bytes).substr(second.offset, second.size)));
+            bytes.replace(second.offset + second.size, 4, crc);
+        }
+        Save(fixture.path, bytes);
+        SSTableReader reader(fixture.path);
+        auto it = reader.Begin();
+        REQUIRE(it.Valid());
+        ExpectThrows<std::runtime_error>([&] { it.Next(); });
+        CHECK(!it.Valid());
+    }
+    Save(fixture.path, original);
+    readMode = ReadMode::kShortAndInterrupt;
+    readCalls = 0;
+    SSTableReader reader(fixture.path);
+    auto it = reader.Begin();
+    REQUIRE(it.Valid());
+    it.Next();
+    REQUIRE(it.Valid());
+    CHECK_STR_EQ(it.Value(), "second");
+    it.Next();
+    CHECK(!it.Valid());
+    readMode = ReadMode::kNormal;
+}
+
 }
 int main() {
+    RUN_TEST(TestIteratorTraversal);
+    RUN_TEST(TestIteratorCacheEviction);
+    RUN_TEST(TestIteratorReadErrors);
     RUN_TEST(TestEmptyAndLifecycle);
     RUN_TEST(TestSingleBlockQueries);
     RUN_TEST(TestCrossBlockVersions);

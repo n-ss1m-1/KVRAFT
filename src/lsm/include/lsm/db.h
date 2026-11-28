@@ -28,8 +28,16 @@ struct DBOptions
     bool enableWal = true;
     size_t memTableSizeLimit = 4 * 1024 * 1024;         // 禁用 0
     size_t blockCacheCapacity = 8 * 1024 * 1024;        // 0 表示不使用 BlockCache
-    size_t maxGroupRequests = 32;                      // 禁用 0
-    size_t maxGroupBytes = 1024 * 1024;                // 每组预计 WAL 编码字节的最大预算
+    size_t maxGroupRequests = 32;                       // 禁用 0
+    size_t maxGroupBytes = 1024 * 1024;                 // 每组预计 WAL 编码字节的最大预算
+    size_t targetSSTableDataSize = 4 * 1024 * 1024;     // Compaction 专用：记录编码字节目标、不是文件大小硬限制 -> 估计expectedKeyCount
+    size_t maxLevels = 7;                               // SSTable最大层数(而非层号)
+    size_t maxCompactionSourceBytes = 4 * 1024 * 1024;  // Compaction：源表的最大预算(仅单表可超)
+    bool enableAutoCompaction = true;                   // 自动合并
+    size_t level0CompactionTrigger = 4;                 // L0 达到多少张表时触发自动合并
+    size_t level1TargetBytes = 16 * 1024 * 1024;      // L1 容量目标
+    size_t levelSizeMultiplier = 10;                  // 层间目标容量倍率
+    size_t maxCompactionSourceExpansionFactor = 2;    // 目标输入不增加时有限扩展源输入：最多拓展为基础源预算的x倍
 };
 
 class DB : private lsm::NonCopyable
@@ -46,7 +54,7 @@ public:
     // 调用者必须保证析构期间没有其他前台调用
     ~DB();
 
-   // 构造Entry并交给Write；sequence由Write在锁内统一分配
+    // 构造Entry并交给Write；sequence由Write在锁内统一分配
     void Put(std::string_view key, std::string_view value);
     void Delete(std::string_view key);
 
@@ -67,6 +75,7 @@ public:
     // 后台失败或关闭时抛异常；不等待旧WAL清理成功
     void Flush();
 
+    void CompactLevel(uint32_t sourceLevel);
 private:
     struct MemTableState
     {
@@ -76,6 +85,13 @@ private:
 #endif
         std::shared_ptr<MemTable> table;        // shared_ptr: 让后台能保留稳定引用 而不提前析构
         std::vector<uint64_t> walNumbers;       // (分段式WAL)应对恢复时一个MemTable对应多个wal文件的情况 方便分批次清理wal文件
+    };
+
+    // ! 将sstable的元数据和Reader绑定，从而查询、恢复时不需要依赖manifest中储存的元数据的顺序
+    struct SSTableState
+    {
+        TableMeta meta;
+        std::shared_ptr<SSTableReader> reader;
     };
 
     struct PendingWrite
@@ -96,6 +112,8 @@ private:
     void CheckHealth() const;
     // 调用者已持dbMutex_；重新抛出后台异常，或报告故障、关闭状态
     void CheckHealthLocked() const;
+    // 调用者已持dbMutex_；只检查failed_、backgroundError_
+    void CheckFailureLocked() const;
 
     // 扫描正式和临时SSTable文件名，确认下一个可用编号
     void InitializeNextFileNumber();
@@ -107,10 +125,6 @@ private:
     // 持久化数据库目录项变更，用于新WAL创建和旧WAL删除
     // SSTableWriter和Manifest::Save已自行同步目录，无需重复调用
     void SyncDirectory() const;
-
-    // 将WAL原子替换为空文件，同步目录并重新打开WalWriter
-    // 仅在开启WAL且MANIFEST发布成功后调用
-    // void ResetWal();
 
     // 扫描数据库目录中的正式WAL段 按编号升序返回
     // 同时确定nextWalNumber_
@@ -126,7 +140,10 @@ private:
 
     // 后台线程入口
     // 捕获异常、保存错误并通知前台 异常不能逃出线程入口，否则会触发std::terminate
-    void BackgoundLoop();
+    void FlushLoop();
+
+    // 以下时刻进行检查：恢复完成、合并线程启动时 || Flush 发布新 L0 表并通知时 || 一次 Compaction 完成、后台回到循环时 || 手动请求登记并通知时
+    void CompactionLoop();
 
     // 调用者已持dbMutex_，且DB健康、active非空、immutable不存在
     // 先准备新MemTable和WAL，再冻结并移交旧active，最后通知后台
@@ -141,8 +158,20 @@ private:
     // WAL或MemTable写入阶段出错则标记DB故障并抛异常；队列收尾和完成通知由Write负责
     void WriteGroup(const std::vector<PendingWrite*>& group);
 
+    // 锁外： build SStable + 写文件 + 记录TableMeta
+    std::vector<TableMeta> BuildCompactionOutputs(const std::vector<const SSTableReader*>& tables, uint32_t targetLevel);
+
+    // 仅供合并线程调用；可与 FlushImmutable 并行构建，发布由 dbMutex_ 串行保护
+    // 选择源层有限输入及目标层重叠文件进行合并，不处理 active/immutable
+    void CompactTables(uint64_t taskRequest, uint32_t sourceLevel);
+
+    // 调用者持有 dbMutex_
+    // 返回需要自动合并的源层 不存在则返回 nullopt
+    std::optional<uint32_t> PickAutoCompactionLevelLocked() const;
 
 private:
+    using LevelTables = std::vector<SSTableState>;
+
     DBOptions options_;
     std::string directory_;
     std::string manifestPath_;
@@ -150,14 +179,16 @@ private:
 
     mutable std::mutex dbMutex_;                            // mutable: Get()const 也能加锁使用
     std::condition_variable backgroundCv_;
-    std::thread backgoundThread_;
+    std::thread flushThread_;
+    std::thread compactionThread_;
     std::exception_ptr backgroundError_;
 
     std::mutex writeQueueMutex_;
     std::deque<PendingWrite*> writeQueue_;                  // group commit
     
     Manifest manifest_;
-    std::vector<std::unique_ptr<SSTableReader>> tables_;    // 与manifest.Tables()一一对应，按刷盘顺序从旧到新保存 -> Get()反向遍历 优先查询最新表
+    //std::vector<std::shared_ptr<SSTableReader>> tables_;    // 与 manifest_.Tables() 一一对应 Compaction输出位于保留的新刷盘表之前 Get 逆序查询
+    std::vector<LevelTables> levels_;
 
     MemTableState active_;
     std::optional<MemTableState> immutable_;
@@ -166,6 +197,9 @@ private:
 
     uint64_t lastSequence_ = 0;                     // 编号分配进度，恢复时结合MANIFEST与WAL确定
     uint64_t publishedSequence_ = 0;                // 已对查询可见的最大sequence；未开启WAL时不含持久化承诺
+    uint64_t compactionRequested_ = 0;              // Compaction：已提交的最大请求编号
+    uint64_t compactionCompleted_ = 0;              // Compaction：已完成的最大请求编号
+    uint32_t sourceLevel_ = 0;                      // 用于前台->后台Compaction传递(单任务栏位-条件变量等待)
     uint64_t nextFileNumber_ = 1;                  // ! Recover()扫描初始化，运行时分配后递增
     uint64_t nextWalNumber_ = 1;
 

@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <new>          // std::bad_alloc
+#include <cassert>
 
 #include "sstable.h"
 #include "diagnostics.h"
@@ -217,6 +218,11 @@ SSTableReader::~SSTableReader()
         close(fd_);
         fd_ = -1;
     }
+}
+
+SSTableReader::Iterator SSTableReader::Begin() const        // ! 类外(返回值)：必须指明SSTableReader作用域
+{
+    return Iterator(this);
 }
 
 LookupResult SSTableReader::Get(uint64_t readSequence, std::string_view userKey) const 
@@ -604,4 +610,69 @@ uint64_t SSTableWriter::Write(const std::string& path, const SSTableBuilder& bui
     return fileOffset;
 }
 
+SSTableReader::Iterator::Iterator(const SSTableReader* owner)
+    : owner_(owner)
+{
+    // 空sstable直接跳过
+    if(owner_->index_.empty()) return;
+    const auto& idx = owner_->index_[blockIndex_];
+    auto block = owner_->LoadDataBlock(idx.offset, idx.size);
+    auto iter = block->Begin();
+
+    // 空块报错
+    if(!iter.Valid()) throw std::runtime_error("SSTable::iterator::Iterator: empty data block");
+
+    // 成功才整体移动发布
+    currentBlock_ = std::move(block);
+    blockIterator_ = std::move(iter);
+}
+
+bool SSTableReader::Iterator::Valid() const
+{
+    return blockIterator_.has_value() && blockIterator_->Valid();       //  当前没有块可读时：Next()中置空blockIterator_    当前块读完了：blockIterator_无效
+}
+
+const InternalKey& SSTableReader::Iterator::Key() const
+{
+    assert(Valid());
+    return blockIterator_->Key();
+}
+
+const std::string& SSTableReader::Iterator::Value() const
+{
+    assert(Valid());
+    return blockIterator_->Value();
+}
+
+// ! 注意实现思路
+void SSTableReader::Iterator::Next()
+{
+    // 当前的迭代器是有效的 -> 移动到下一节点
+    assert(Valid());
+    blockIterator_->Next();
+    if(blockIterator_->Valid()) return;     // 仍有效 不需要更换datablock
+
+    // 当前块结束，先撤下块内迭代器
+    blockIterator_.reset();
+    blockIndex_++;
+
+    // 已经没有块可读：撤下DataBlockReader引用
+    if(blockIndex_ >= owner_->index_.size())
+    {
+        currentBlock_.reset();
+        return;
+    }
+
+    // 仍有块可读
+    const auto& idx = owner_->index_[blockIndex_];
+    auto block = owner_->LoadDataBlock(idx.offset, idx.size);
+    auto iter = block->Begin();
+
+    // 空块报错
+    if(!iter.Valid()) throw std::runtime_error("SSTableReader::Iterator::Next: empty data block");
+
+    // 成功才整体移动发布
+    currentBlock_ = std::move(block);
+    blockIterator_ = std::move(iter);
+}
 

@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <optional>
 
 #include "internal_key.h"
 #include "data_block.h"
@@ -83,16 +84,35 @@ private:
 class SSTableReader : private lsm::NonCopyable
 {
 public:
+    class Iterator
+    {
+    public:
+        bool Valid() const;
+        const InternalKey& Key() const;
+        const std::string& Value() const;
+        void Next();
+    private:
+        friend SSTableReader;
+
+        explicit Iterator(const SSTableReader* owner);
+        const SSTableReader* owner_ = nullptr;
+        size_t blockIndex_ = 0;                                     // 当前datablock的索引下标
+        std::shared_ptr<const DataBlockReader> currentBlock_;       // 保证其生命周期 >= 顺序读取过程
+        std::optional<DataBlockReader::Iterator> blockIterator_;    // ! 声明是公开的，构造是私有的(获取有效迭代器必须通过Begin())      // ! 无默认构造函数，无法在SSTableReader::Iterator的构造函数初始化列表中完成构造 -> optional延迟构造
+    };
+
     /* 
      打开文件并加载 Footer、BloomFilter、Index
      系统调用失败抛 std::system_error
      文件格式或校验和错误抛 std::runtime_error
     */
-    
     explicit SSTableReader(const std::string& path);
     SSTableReader(const std::string& path, uint64_t fileNumber, std::shared_ptr<BlockCache> blockCache);
     ~SSTableReader();
     
+    // 返回 SSTableReader 的起始迭代器
+    Iterator Begin() const;
+
     // 按照 readSequence 查找 userKey 的可见版本记录
     LookupResult Get(uint64_t readSequence, std::string_view userKey) const;
 
